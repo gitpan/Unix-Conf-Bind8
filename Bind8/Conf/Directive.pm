@@ -47,6 +47,14 @@ sub new
 	return ($new);
 }
 
+sub DESTROY
+{
+	my $self = $_[0];
+	# all directive types are hash
+	# delete hash
+	undef (%$self);
+}
+
 =item dirty ()
 
  Arguments
@@ -83,10 +91,12 @@ sub delete
 	my $ret;
 
 	# Get the class of the invocant
-	my $type = lc (ref ($self) =~ m/^.+::(.+)$/);
+	my $type = ref ($self);
+	$type =~ s/^.+::(.+)$/$1/;
+	$type = lc ($type);
 	my $meth = "Unix::Conf::Bind8::Conf::_del_$type";
 	$ret = &$meth ($self) or return ($ret);
-	$ret = Unix::Conf::Bind::Conf::_delete_from_list ($self) 
+	$ret = Unix::Conf::Bind8::Conf::_delete_from_list ($self) 
 		or return ($ret);
 	$self->dirty (1);
 	return (1);
@@ -115,16 +125,31 @@ sub _parent
 # returns the directive rendered as a string.
 sub _rstring
 {
-	my ($self, $string) = @_;
+	my ($self, $string, $arg) = @_;
 
 	if (defined ($string)) {
-		$self->{rendered} = $string;
+		$self->{RENDERED} = ref ($string) ? $string : \$string;
 		$self->dirty (0);
 		return (1);
 	}
 	# make sure we render before returning IF dirty
-	$self->__render () if ($self->dirty ());
-	return ($self->{rendered});
+	if ($self->dirty ()) {
+		$self->__render ($arg);
+		$self->dirty (0);
+	}
+	return ($self->{RENDERED});
+}
+
+# set method.
+sub _tws
+{
+	my ($self, $string) = @_;
+
+	if (defined ($string)) {
+		$self->{TWS} = ref ($string) ? $string : \$string;
+		return (1);
+	}
+	return ($self->{TWS});
 }
 
 1;

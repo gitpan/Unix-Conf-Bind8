@@ -29,12 +29,16 @@ sub __make_relative ($$)
 #	ORIGIN
 #	ARG
 sub __make_absolute ($$)	
-{ 
+{
 	my ($origin, $label) = @_;
-	return (
-		($label =~ /^[\w.-]+\.$/) ? $label : 
-			($origin ? "$label.$origin" : $label)
-	);
+	# if ending in a '.' return as is
+	return ($label)
+		if ($label =~ /^[\w.-]+\.$/);
+
+	return (($label) ? "$label.$origin" : $origin)
+		if ($origin); 
+
+	return ($label);
 }
 
 sub __is_absolute ($) 		{ return ($_[0] =~ /^[\w.-]+\.$/); 	}

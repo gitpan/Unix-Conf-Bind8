@@ -9,7 +9,54 @@ a Bind8 style configuration file.
 
 =head1 SYNOPSIS
 
-Refer to the SYNOPSIS section for Unix::Conf::Bind8.
+    my ($conf, $obj, $ret);
+
+    $conf = Unix::Conf::Bind8->new_conf (
+        FILE		=> 'named.conf',
+        SECURE_OPEN	=> '/etc/named.conf',
+    ) or $conf->die ("couldn't create `named.conf'");
+
+    #
+    # All directives have corrresponding new_*, get_*, delete_*
+    # methods
+    #
+
+    $obj = $conf->new_zone (
+        NAME	=> 'extremix.net',
+        TYPE	=> 'master',
+        FILE	=> 'db.extremix.net',
+    ) or $obj->die ("couldn't create zone `extremix.net'");
+
+    # For objects that have a name attribute, name is to
+    # be specified, otherwise no arguments are needed.
+    $obj = $conf->get_zone ('extremix.net')
+        or $obj->die ("couldn't get zone `extremix.net'");
+
+    $obj = $conf->get_options ()
+        or $obj->die ("couldn't get options");
+
+    # For objects that have a name attribute, name is to
+    # be specified, otherwise no arguments are needed.
+    $obj = $conf->delete_zone ('extremix.net')
+        or $obj->die ("couldn't delete zone `extremix.net'");
+
+    $obj = $conf->delete_options ()
+        or $obj->die ("couldn't get options");
+
+    # directives that have a name attribute, have iterator
+    # methods
+    printf ("Zones defined in %s:\n", $conf->fh ());
+    for my $zone ($conf->zones ()) {
+        printf ("%s\n", $zone->name ();
+    }
+
+    printf ("Directives defined in %s:\n", $conf->fh ());
+    for my $dir ($conf->directives ()) {
+        print ("$dir\n");
+    }
+
+    $db = $conf->get_db ('extremix.net')
+        or $db->die ("couldn't get db for `extremix.net'");
 
 =head1 DESCRIPTION
 
@@ -17,8 +64,9 @@ This class has interfaces for the various class methods of the classes that
 reside beneath Unix::Conf::Bind8::Conf. This class is an internal class and 
 should not be accessed directly. Methods in this class can be accessed 
 through a Unix::Conf::Bind8::Conf object which is returned by 
-Unix::Conf::Bind8->new_conf (). Refer to Unix::Conf::Bind8 for further 
-details.
+Unix::Conf::Bind8->new_conf ().
+
+=head1 METHODS
 
 =cut
 
@@ -28,13 +76,18 @@ use strict;
 use warnings;
 
 use Unix::Conf;
-use Unix::Conf::Bind8::Conf::Directive;
+use Unix::Conf::Bind8::Conf::Comment;
 use Unix::Conf::Bind8::Conf::Lib;
 use Unix::Conf::Bind8::Conf::Logging;
 use Unix::Conf::Bind8::Conf::Options;
 use Unix::Conf::Bind8::Conf::Acl;
 use Unix::Conf::Bind8::Conf::Zone;
+use Unix::Conf::Bind8::Conf::Trustedkeys;
+use Unix::Conf::Bind8::Conf::Key;
+use Unix::Conf::Bind8::Conf::Controls;
+use Unix::Conf::Bind8::Conf::Server;
 use Unix::Conf::Bind8::Conf::Include;
+use Unix::Conf::Bind8::Conf::Lib;
 
 #
 # Unix::Conf::Bind8::Conf object
@@ -98,20 +151,29 @@ sub new
 	$tail->{PREV} = $head;
 
 	$new = bless (
-		\{ 
-			DIRTY => 0, 
-			HEAD => $head,
-			TAIL => $tail,
+		\{
+			DIRTY	=> 0, 
+			ITR		=> 0,
+			DIRARR	=> [],
+			HEAD	=> $head,
+			TAIL	=> $tail,
+			ERRORS	=> [],
 		},
 	);
 	$$new->{FH} = $conf_fh;
 	# in case no ROOT was passed then we were not called from 
-	# Unix::Conf::Bind8::Conf::Include->new (). So set ourselves
-	# as ROOT as it is so.
+	# Unix::Conf::Bind8::Conf::Include->new (). So set ourself
+	# as ROOT.
 	# NOTE: we set the hashref to which the object (a scalar ref)
 	# points to as the value for ROOT, to solve the circular ref problem
 	$ret = $new->__root ($args{ROOT} ? $args{ROOT} : $$new) or return ($ret);
-	eval { $ret = $new->__parse_conf () } or return ($@);
+	eval { $ret = $new->__parse_conf () } or do {
+		return ($@) if (ref ($@) && UNIVERSAL::isa ($@, 'Unix::Conf::Err'));
+		# if a run time perl error has been trapped, make it into an Err obj.
+		return (
+			Unix::Conf->_err ('new', "Parse of $conf_fh failed because\n$@")
+		);
+	};
 	return ($new);
 }
 
@@ -119,20 +181,43 @@ sub new
 sub DESTROY
 {
 	my $self = $_[0];
+	my $dirty = $self->dirty ();
+	#print sprintf ("destructor for conf object (%s:%x)\n", $self->fh (), $self);
+	my $file;
 
-	if ($self->dirty ()) {
-		my $file;
-		# go through the array of directives and create a string representing
-		# the whole file.
+	# make sure we destroy DIRARR (used for iteration first)
+	undef ($$self->{DIRARR});
 
-		for (my $ptr = $$self->{HEAD}{NEXT}; $ptr && $ptr ne $$self->{TAIL}; $ptr = $ptr->{NEXT}) {
+	# go through the array of directives and create a string representing
+	# the whole file.
+	my ($ptr, $tmp, $tws);
+	$ptr = $$self->{HEAD}{NEXT};
+	$$self->{HEAD}{NEXT} = undef;
+	while ($ptr && $ptr ne $$self->{TAIL}) {
+		if ($dirty) {
 			$file .= ${$ptr->_rstring ()};
+			$tws = $ptr->_tws ();
+			$file .= defined ($tws) ? $$tws : "\n";
 		}
-
-		# set the string as the contents of the ConfIO object.
-		$$self->{FH}->set_scalar (\$file);
+		$tmp = $ptr;
+		$ptr = $ptr->{NEXT};
+		# remove circular references
+		$tmp->{NEXT} = undef;
+		$tmp->{PREV} = undef;
 	}
+	# clear TAIL's prev pointer too.
+	$ptr->{PREV} = undef;
+
+	# set the string as the contents of the ConfIO object.
+	$$self->{FH}->set_scalar (\$file) if ($file);
+	# ensure that we release our own Conf file first.
+	undef ($$self->{FH});
+	# then include directives
+	undef ($$self->{INCLUDE});
+	undef ($$self->{ALL_INCLUDE});
+	# then the rest
 	undef (%{$$self});
+	undef ($self);
 }
 
 =item fh ()
@@ -162,19 +247,25 @@ sub dirty
 #
 # The _add_dir* routines, insert an object into the per Conf hash and the
 # ALL_* hash which resides in the ROOT Conf.
-#
 
-for my $dir qw (zone acl include) {
+for my $dir qw (zone acl key server include comment) {
 	no strict 'refs';
 
-	my $meth = "_add_$dir";
-	*$meth = sub {
+	my $_add = "_add_$dir";
+	my $_get = "_get_$dir";
+	my $_del = "_del_$dir";
+	my $new = "new_$dir";
+	my $get = "get_$dir";
+	my $delete = "delete_$dir";
+	my $itr = "${dir}s";
+
+	*$_add = sub {
 		my $obj = $_[0];
 		my ($root, $parent, $name);
 		$parent = $obj->_parent () or return ($root);
 		$root = $parent->{ROOT};
 		$name = $obj->name () or return ($name);
-		return (Unix::Conf->_err ("$meth", "$dir `$name' already defined"))
+		return (Unix::Conf->_err ("$_add", "$dir `$name' already defined"))
 			if ($root->{"ALL_\U$dir\E"}{$name});
 		# store in per Conf hash as well as in the ROOT Conf object
 		$parent->{"\U$dir\E"}{$name} = $root->{"ALL_\U$dir\E"}{$name} = $obj;
@@ -184,39 +275,127 @@ for my $dir qw (zone acl include) {
 	# we get from the ROOT ALL_DIR* hash, so we can get a directive
 	# defined in any Conf file from any Conf object.
 	# maybe it is better to restrict _get_* to directives defined in
-	# that file only.
-	$meth = "_get_$dir";
-	*$meth = sub {
+	# that file only. 
+	# added later. validation routines in Unix::Conf::Bind8::Conf::Lib
+	# get confds structures and need to validate names defined throughout.
+	# some more thought needed.
+	*$_get = sub {
 		my ($confds, $name) = @_;
-		return (Unix::Conf->_err ("$meth", "$dir `$name' not defined"))
+		return (Unix::Conf->_err ("$_get", "$dir `$name' not defined"))
 			unless ($confds->{ROOT}{"ALL_\U$dir\E"}{$name});
 		return ($confds->{ROOT}{"ALL_\U$dir\E"}{$name});
 	};
 
-	$meth = "_del_$dir";
-	*$meth = sub {
+	*$_del = sub {
 		my $obj = $_[0];
 		my ($root, $parent, $name);
 		$parent = $obj->_parent () or return ($root);
 		$root = $parent->{ROOT};
 		$name = $obj->name () or return ($name);
-		return (Unix::Conf->_err ("$meth", "$dir `$name' not defined"))
+		return (Unix::Conf->_err ("$_del", "$dir `$name' not defined"))
 			unless ($root->{"ALL_\U$dir\E"}{$name});
-		$root->{"ALL_\U$dir\E"}{$name} = $parent->{"\U$dir\E"}{$name} = undef;
+		delete ($root->{"ALL_\U$dir\E"}{$name});
+		delete ($parent->{"\U$dir\E"}{$name});
 		return (1);
 	};
+
+	##################################################################
+	#                     PUBLIC INTERFACE                           #
+	##################################################################
+
+	if ($dir eq 'include') {
+		*$new = sub {
+			my $self = shift ();
+
+			return (Unix::Conf->_err ("$new", "not a class constructor"))
+				unless (ref ($self));
+			my $class = "Unix::Conf::Bind8::Conf::\u$dir";
+			return ($class->new (@_, PARENT => $$self, ROOT => $self->__root ()));
+		};
+		# no real need to create this here.
+		my $get_conf = "get_include_conf";
+		*$get_conf = sub {
+			my ($self, $name) = @_;
+
+			return (Unix::Conf->_err ("$get_conf", "not a class method"))
+				unless (ref ($self));
+			return (Unix::Conf->_err ("$get_conf", "name not specified"))
+				unless (defined ($name));
+			my $ret;
+			$ret = _get_include ($$self, $name) or return ($ret);
+			return ($ret->conf ());
+		};
+	}
+	else {
+		*$new = sub {
+			my $self = shift ();
+
+			return (Unix::Conf->_err ("$new", "not a class constructor"))
+				unless (ref ($self));
+			my $class = "Unix::Conf::Bind8::Conf::\u$dir";
+			return ($class->new (@_, PARENT => $$self));
+		};
+	}
+	
+	# no get_ and delete_, iterator methods for comment. at least for now
+	if ($dir ne 'comment') {
+		*$get = sub {
+			my ($self, $name) = @_;
+			return (Unix::Conf->_err ("$get", "not a class constructor"))
+				unless (ref ($self));
+			return (Unix::Conf->_err ("$get", "$dir name not passed"))
+				unless ($name);
+			return (&$_get($$self, $name));
+		};
+
+		*$delete = sub {
+			my ($self, $name) = @_;
+			return (Unix::Conf->_err ("$delete", "not a class constructor"))
+				unless (ref ($_[0]));
+			return (Unix::Conf->_err ("$delete", "$dir name not passed"))
+				unless ($name);
+			my $obj;
+			$obj = &$_get($$self, $name)	or return ($obj);
+			return ($obj->delete ());
+		};
+		
+		*$itr = sub {
+			my ($self, $context) = @_;
+
+			return (Unix::Conf->_err ("$delete", "not a class constructor"))
+				unless (ref ($self));
+			if ($context && __valid_yesno ($context)) {
+				return (
+					wantarray () ? values (%{$$self->{ROOT}{"ALL_\U$dir\E"}}) :
+						(each (%{$$self->{ROOT}{"ALL_\U$dir\E"}}))[1]
+				);
+			}
+			return (
+				wantarray () ? values (%{$$self->{"\U$dir\E"}}) :
+					(each (%{$$self->{"\U$dir\E"}}))[1]
+			);
+		};
+	}
 }
 
-for my $dir qw (options logging) {
+# directives that do not have names, and hence
+# defined once only.
+for my $dir qw (options logging trustedkeys controls) {
 	no strict 'refs';
 
-	my $meth = "_add_$dir";
-	*$meth = sub {
+	my $_add	= "_add_$dir";
+	my $_get	= "_get_$dir";
+	my $_del	= "_del_$dir";
+	my $new		= "new_$dir";
+	my $get		= "get_$dir";
+	my $delete	= "delete_$dir";
+
+	*$_add = sub {
 		my $obj = $_[0];
 		my ($root, $parent);
 		$parent = $obj->_parent () or return ($parent);
 		$root = $parent->{ROOT};
-		return (Unix::Conf->_err ("$meth", "`$dir' already defined"))
+		return (Unix::Conf->_err ("$_add", "`$dir' already defined"))
 			if ($root->{"ALL_\U$dir\E"});
 		$root->{"ALL_\U$dir\E"} = $parent->{"\U$dir\E"} = $obj;
 		return (1);
@@ -226,24 +405,52 @@ for my $dir qw (options logging) {
 	# defined in any Conf file from any Conf object.
 	# maybe it is better to restrict _get_* to directives defined in
 	# that file only.
-	$meth = "_get_$dir";
-	*$meth = sub {
+	*$_get = sub {
 		my $confds = $_[0];
-		return (Unix::Conf->_err ("$meth", "`$dir' not defined"))
+		return (Unix::Conf->_err ("$_get", "`$dir' not defined"))
 			unless ($confds->{ROOT}{"ALL_\U$dir\E"});
 		return ($confds->{ROOT}{"ALL_\U$dir\E"});
 	};
 
-	$meth = "_del_$dir";
-	*$meth = sub {
+	$_del = "_del_$dir";
+	*$_del = sub {
 		my $obj = $_[0];
 		my ($root, $parent);
-		$root = $obj->_parent () or return ($root);
+		$parent = $obj->_parent () or return ($root);
 		$root = $parent->{ROOT};
-		return (Unix::Conf->_err ("$meth", "`$dir' not defined"))
+		return (Unix::Conf->_err ("$_del", "`$dir' not defined"))
 			unless ($root->{"ALL_\U$dir\E"});
-		$root->{"ALL_\U$dir\E"} = $parent->{"\U$dir\E"} = undef;
+		delete ($root->{"ALL_\U$dir\E"});
+		delete ($parent->{"\U$dir\E"});
 		return (1);
+	};
+
+	##################################################################
+	#                     PUBLIC INTERFACE                           #
+	##################################################################
+
+	*$new = sub {
+		my $self = shift ();
+
+		return (Unix::Conf->_err ("$new", "not a class constructor"))
+			unless (ref ($self));
+		my $class = "Unix::Conf::Bind8::Conf::\u$dir";
+		return ($class->new (@_, PARENT => $$self));
+	};
+
+	*$get = sub {
+		return (Unix::Conf->_err ("$get", "not a class constructor"))
+			unless (ref ($_[0]));
+		return (&$_get(${$_[0]}));
+	};
+
+	*$delete = sub {
+		my $obj;
+
+		return (Unix::Conf->_err ("$delete", "not a class constructor"))
+			unless (ref ($_[0]));
+		$obj = &$_get(${$_[0]})	or return ($obj);
+		return ($obj->delete ());
 	};
 }
 
@@ -261,12 +468,12 @@ sub _insert_in_list ($$;$)
 	return (Unix::Conf->_err ("__insert_in_list", "`$obj' not instance of a subclass of Unix::Conf::Bind8::Conf::Directive"))
 		unless (UNIVERSAL::isa ($obj, "Unix::Conf::Bind8::Conf::Directive"));
 	return (Unix::Conf->_err ("__insert_in_list", "`$where', illegal argument"))
-		if ($where !~ /^(FIRST|LAST|BEFORE|AFTER)$/);
+		if ($where !~ /^(FIRST|LAST|BEFORE|AFTER)$/i);
 	my $conf = $obj->_parent ();
 
 	# now insert the directive in the doubly linked list
 	# insert at the head
-	($where eq 'FIRST') && do {
+	(uc ($where) eq 'FIRST') && do {
 		$obj->{PREV} = $conf->{HEAD};
 		$obj->{NEXT} = $conf->{HEAD}{NEXT};
 		$conf->{HEAD}{NEXT}{PREV} = $obj;
@@ -274,7 +481,7 @@ sub _insert_in_list ($$;$)
 		goto END;
 	};
 	# insert at tail
-	($where eq 'LAST') && do {
+	(uc ($where) eq 'LAST') && do {
 		$obj->{NEXT} = $conf->{TAIL};
 		$obj->{PREV} = $conf->{TAIL}{PREV};
 		$conf->{TAIL}{PREV}{NEXT} = $obj;
@@ -285,7 +492,7 @@ sub _insert_in_list ($$;$)
 	return (Unix::Conf->_err ("__insert_in_list", "$where not an child of Unix::Conf::Bind8::Conf::Directive"))
 		unless (UNIVERSAL::isa ($arg, "Unix::Conf::Bind8::Conf::Directive"));
 	# before $arg
-	($where eq 'BEFORE') && do {
+	(uc ($where) eq 'BEFORE') && do {
 		$obj->{NEXT} = $arg;
 		$obj->{PREV} = $arg->{PREV};
 		$arg->{PREV}{NEXT} = $obj;
@@ -293,7 +500,7 @@ sub _insert_in_list ($$;$)
 		goto END;
 	};
 	# after $arg
-	($where eq 'AFTER') && do {
+	(uc ($where) eq 'AFTER') && do {
 		$obj->{NEXT} = $arg->{NEXT};
 		$obj->{PREV} = $arg;
 		$arg->{NEXT}{PREV} = $obj;
@@ -335,6 +542,21 @@ sub __root
 	);
 }
 
+=item parse_errors ()
+
+Object method.
+Returns a list of Err objects, created during the parse of the conf file.
+There represent warnings generated.
+
+=cut
+
+sub parse_errors
+{
+	my $self = $_[0];
+	return (@{$$self->{ERRORS}});
+}
+
+
 # ARGUMENTS:
 #	Unix::Conf::Err obj
 # called by the parser to push errors messages generated during parsing.
@@ -347,65 +569,85 @@ sub __add_err
 	push (@{$$self->{ERRORS}}, $errobj);
 }
 
-################################### DUMMY ######################################
-#                                                                              #
-
-=item new_dummy ()
+=item directives ()
 
  Arguments
- WHERE		   => 'FIRST'|'LAST'|'BEFORE'|'AFTER'
- WARG		   => Unix::Conf::Bind8::Conf::Directive subclass object
- 				  # WARG is to be provided only in case WHERE eq 'BEFORE 
-				  # or WHERE eq 'AFTER'
+ SCALAR		# Optional
 
 Object method.
-Creates a dummy directive. Such directives are used to hold data 
-between two directives, i.e. comments, whitespace etc.
-Returns a Unix::Conf::Bind8::Conf::Directive object on success or 
-Err object on failure.
+Returns defined directives (comments too, if argument is defined). When
+called in a list context, returns all defined directives. Iterates over
+defined directives, when called in a scalar method. Returns `undef' at
+the end of one iteration, and starts over if called again.
+
+NOTE: This method returns objects which represent directives. Make sure
+that the variable holding these objects is undef'ed or goes out of scope
+before or at the same time as the one holding the invocant. For example
+if you hold an Include object, while the parent Conf object has been released
+and then the code tries to create a new Conf object for the same conf file,
+it will return with an error, because the include file is still open and locked
+as you hold the Include object.
+
+Also this method returns only those directives that are defined in the invocant
+Conf object and not those in embedded objects.
 
 =cut
 
-sub new_dummy 
+sub directives
 {
-	my $self = shift;
-	return (Unix::Conf->_err ('new_options', "not a class constructor"))
-		unless (ref ($self));
-	return (Unix::Conf::Bind8::Conf::Directive->new ( @_, PARENT => $$self ));
+	my ($self, $nocomment) = @_;
+	
+	# create list of directives only if iterator is at start
+	unless ($$self->{ITR}) {
+		undef (@{$$self->{DIRARR}});
+		for (my $ptr = $$self->{HEAD}{NEXT}; $ptr && $ptr ne $$self->{TAIL}; $ptr = $ptr->{NEXT}) {
+			next if ($nocomment && UNIVERSAL::isa ($ptr, "Unix::Conf::Bind8::Conf::Comment"));
+			push (@{$$self->{DIRARR}}, $ptr);
+		}
+	}
+
+	if (wantarray ()) {
+		# reset iterator before returning
+		$$self->{ITR} = 0;
+		return (@{$$self->{DIRARR}}) 
+	}
+	# return undef on completion of one iteration
+	return () if ($$self->{ITR} && !($$self->{ITR} %= scalar (@{$$self->{DIRARR}})));
+	return (${$$self->{DIRARR}}[$$self->{ITR}++]);
 }
 
-#                                    END                                       #
-################################### DUMMY ######################################
 
-################################## OPTIONS #####################################
-#                                                                              #
+=item new_comment ()
+
+ Arguments
+                  # WARG is to be provided only in case WHERE eq 'BEFORE 
+                  # or WHERE eq 'AFTER'
+
+Object method.
+Creates a Unix::Conf::Bind8::Conf::Comment object, links it in the invocant
+Conf object and returns it, on success, an Err object otherwise.
+Such directives are used to hold comments between two directives.
+
+=cut
 
 =item new_options ()
 
  Arguments
  SUPPORTED-OPTION-NAME-IN-CAPS => value    
- WHERE		   => 'FIRST'|'LAST'|'BEFORE'|'AFTER'
- WARG		   => Unix::Conf::Bind8::Conf::Directive subclass object
- 				  # WARG is to be provided only in case WHERE eq 'BEFORE 
-				  # or WHERE eq 'AFTER'
+ WHERE         => 'FIRST'|'LAST'|'BEFORE'|'AFTER'
+ WARG          => Unix::Conf::Bind8::Conf::Directive subclass object
+                  # WARG is to be provided only in case WHERE eq 'BEFORE 
+                  # or WHERE eq 'AFTER'
 
 Object Method.
 Refer to Unix::Conf::Bind8::Conf::Options for supported options. The 
 arguments should be same as expected by various the various methods of 
 Unix::Conf::Bind8::Conf::Options.
-Returns a Unix::Conf::Bind8::Conf::Options object on success or an Err 
-object on failure.
+Creates a Unix::Conf::Bind8::Conf::Options object, links it in the invocant
+Conf object and returns it, on success, an Err object on otherwise.
 
 =cut
  
-sub new_options
-{
-	my $self = shift ();
-	return (Unix::Conf->_err ('new_options', "not a class constructor"))
-		unless (ref ($self));
-	return (Unix::Conf::Bind8::Conf::Options->new (@_, PARENT => $$self ));
-}
-
 =item get_options ()
 
 Object method.
@@ -414,11 +656,6 @@ through a call to new_options or one created when the configuration file
 is parsed) or Err if none is defined.
 
 =cut
-
-sub get_options
-{
-	return (_get_options (${$_[0]}));
-}
 
 =item delete_options ()
 
@@ -430,235 +667,6 @@ Returns true if a Unix::Conf::Bind8::Conf::Options object is present, an
 Err object otherwise.
 
 =cut
-
-sub delete_options
-{
-	my ($options, $ret);
-	$options = _get_options (${$_[0]}) or return ($options);
-	return ($options->delete ());
-}
-	
-#                                    END                                       #
-################################## OPTIONS #####################################
-
-#################################### ACL #######################################
-#                                                                              #
-
-=item new_acl ()
-
- Arguments
- NAME      => 'acl-name',				# Optional
- ELEMENTS  => [ qw (10.0.0.1 10.0.0.2 192.168.1.0/24) ],
- WHERE		   => 'FIRST'|'LAST'|'BEFORE'|'AFTER'
- WARG		   => Unix::Conf::Bind8::Conf::Directive subclass object
- 				  # WARG is to be provided only in case WHERE eq 'BEFORE 
-				  # or WHERE eq 'AFTER'
-
-Object method.
-Returns a new Unix::Conf::Bind8::Conf::Acl object on success or an Err object
-on failure.
-
-=cut
-
-sub new_acl
-{
-	my $self = shift ();
-	return (Unix::Conf->_err ('new_acl', "not a class constructor"))
-		unless (ref ($self));
-	return (Unix::Conf::Bind8::Conf::Acl->new (@_, PARENT => $$self ));
-}
-
-=item get_acl ()
-
- Arguments
- 'ACL-NAME',
-
-Class/Object method.
-Returns the Unix::Conf::Bind8::Conf::Acl object representing 'ACL-NAME' if
-defined (either through a call to new_acl or one created when the 
-configuration file is parsed), an Err object otherwise.
-
-=cut
-
-sub get_acl
-{
-    my ($self, $name) = @_;
-
- 	return (Unix::Conf->_err ('get_acl', "ACL name not specified"))
- 		unless ($name);
-	return (_get_acl ($$self, $name));
-}
-
-=item delete_acl ()
-
- Arguments
- 'ACL-NAME',
-
-Class/Object method.
-Deletes the Unix::Conf::Bind8::Conf::Acl object representing 'ACL-NAME' 
-if defined (either through a call to new_acl or one created when the 
-configuration file is parsed) and returns true, or returns an Err object 
-otherwise.
-
-=cut
-
-sub delete_acl
-{
-    my ($self, $name) = @_;
-	my $acl;
-	$acl = _get_acl ($$self, $name) or return ($acl);
-	return ($acl->delete ());
-}
-
-=item acls ()
-
- Arguments
- CONTEXT	=> 'ROOT'		# Optional. If this argument is not present
- 							# only ACLs defined in this conf file will
-							# be returned. Else all ACLs defined will
-							# be returned.
-
-Class/Object method.
-Iterates through the list of defined Unix::Conf::Bind8::Conf::Acl objects 
-(either through a call to new_acl or ones created when parsing the file, 
-returning an object at a time when called in scalar context, or a list of 
-all objects when called in list context.
-
-=cut
-
-sub acls
-{
-	my $self = shift ();
-	my %args = @_;
-	if ($args{CONTEXT} && $args{CONTEXT} eq 'ROOT') {
-		return (
-			wantarray () ? values (%{$$self->{ROOT}{ALL_ACL}}) : (each (%{$$self->{ROOT}{ALL_ACL}}))[1]
-		);
-	}
-	return (
-		wantarray () ? values (%{$$self->{ACL}}) : (each (%{$$self->{ACL}}))[1]
-	);
-}
-
-#                                    END                                       #
-#################################### ACL #######################################
-
-################################### ZONE #######################################
-#                                                                              #
-
-=item new_zone ()
- 
- Arguments
- NAME          => 'zone-name',
- CLASS         => 'zone-class',        # in|hs|hesiod|chaos
- TYPE          => 'zone-type',         # master|slave|forward|stub|hint
- FILE          => 'records-file',
- MASTERS       => [ qw (10.0.0.1 10.0.0.2) ],
- FORWARD       => 'value',             # yes|no
- FORWARDERS    => [ qw (192.168.1.1 192.168.1.2) ],
- CHECK-NAMES   => 'value'              # fail|warn|ignore
- ALLOW-UPDATE  => Unix::Conf::Bind8::Conf::Acl object,
- ALLOW-QUERY   => Unix::Conf::Bind8::Conf::Acl object,
- ALLOW-TRANSFER=> Unix::Conf::Bind8::Conf::Acl object,
- NOTIFY        => 'value,              # yes|no
- ALSO-NOTIFY   => [ qw (10.0.0.3) ],
- WHERE		   => 'FIRST'|'LAST'|'BEFORE'|'AFTER'
- WARG		   => Unix::Conf::Bind8::Conf::Directive subclass object
- 				  # WARG is to be provided only in case WHERE eq 'BEFORE 
-				  # or WHERE eq 'AFTER'
-
-Object method.
-Creates and returns a new Unix::Conf::Bind8::Conf::Zone object if 
-successful, or an Err object otherwise.
-
-=cut
-
-sub new_zone
-{
-	my $self = shift ();
-	my ($new, $ret);
-	
-	return (Unix::Conf->_err ('new_zone', "not a class constructor"))
-		unless (ref ($self));
-	return (Unix::Conf::Bind8::Conf::Zone->new (@_, PARENT => $$self ));
-}
-
-=item get_zone ()
- Arguments
- 'ZONE-NAME',
-
-Class/Object method.
-Returns the Unix::Conf::Bind8::Conf::Zone object representing ZONE-NAME 
-if defined (either through a call to new_zone () or one created when 
-parsing the configuration file), an Err object otherwise.
-
-=cut
-
-sub get_zone
-{
-	my ($self, $name) = @_;
-
-	return (Unix::Conf->_err ('get_zone', "zone name not specified"))
-		unless ($name);
-	return (_get_zone ($$self, $name));
-}
-
-=item delete_zone ()
-
- Arguments
- 'ZONE-NAME',
-
-Class/Object method.
-Deletes the Unix::Conf::Bind8::Conf::Zone object representing ZONE-NAME 
-if defined (either through a call to new_zone () or one created when 
-parsing the configuration file) and returns true, or returns an Err 
-object otherwise.
-
-=cut
-
-sub delete_zone
-{
-	my ($self, $name) = @_;
-	my $zone;
-	$zone = _get_zone ($$self, $name) or return ($zone);
-	return ($zone->delete ());
-}
-
-=item zones ()
-
- Arguments
- CONTEXT	=> 'ROOT'		# Optional. If this argument is not present
- 							# only ZONEs defined in this conf file will
-							# be returned. Else all ZONEs defined will
-							# be returned.
-
-Class/Object method.
-Iterates through a list of defined Unix::Conf::Bind8::Conf::Zone objects 
-(either through a call to new_zone () or ones created when parsing the 
-configuration file), returning one at a time when called in scalar context, 
-or a list of all objects when called in list context.
-
-=cut
-
-sub zones
-{
-	my $self = shift ();
-	my %args = @_;
-	if ($args{CONTEXT} && $args{CONTEXT} eq 'ROOT') {
-		return (
-			wantarray () ? values (%{$$self->{ROOT}{ALL_ZONE}}) : (each (%{$$self->{ROOT}{ALL_ZONE}}))[1]
-		);
-	}
-	return (
-		wantarray () ? values (%{$$self->{ZONE}}) : (each (%{$$self->{ZONE}}))[1]
-	);
-}
-
-#                                   END                                        #
-################################### ZONE #######################################
-
-################################# LOGGING ######################################
-#                                                                              #
 
 =item new_logging ()
 
@@ -678,91 +686,371 @@ sub zones
       [ category1        => [ qw (channel1 channel2) ],
       [ category2        => [ qw (channel1 channel2) ],
  ],
- WHERE		   => 'FIRST'|'LAST'|'BEFORE'|'AFTER'
- WARG		   => Unix::Conf::Bind8::Conf::Directive subclass object
- 				  # WARG is to be provided only in case WHERE eq 'BEFORE 
-				  # or WHERE eq 'AFTER'
+ WHERE         => 'FIRST'|'LAST'|'BEFORE'|'AFTER'
+ WARG          => Unix::Conf::Bind8::Conf::Directive subclass object
+                  # WARG is to be provided only in case WHERE eq 'BEFORE 
+                  # or WHERE eq 'AFTER'
 
 Object method.
-Creates a new Unix::Conf::Bind8::Conf::Logging object and returns it if 
-successful, or an Err object otherwise.
+Creates a new Unix::Conf::Bind8::Conf::Logging object, links it to the invocant
+Conf object and returns it, on success, an Err object otherwise.
 
 =cut
 
-sub new_logging
-{
-	my $self = shift ();
-	my ($new, $ret);
-
-	return (Unix::Conf::Bind8::Conf::Logging->new (@_, PARENT => $$self ));
-}
-
 =item get_logging ()
 
-Class/Object method.
+Object method.
 Returns the Unix::Conf::Bind8::Logging object if defined (either through a
 call to new_logging () or one created when parsing the configuration file),
 an Err object otherwise.
 
 =cut
 
-sub get_logging
-{
-	return (_get_logging (${$_[0]}));
-}
-
 =item delete_logging ()
 
-Class/Object method.
+Object method.
 Deletes the Unix::Conf::Bind8::Logging object if defined (either through a
 call to new_logging () or one created when parsing the configuration file) 
 and returns true, or returns an Err object otherwise.
 
 =cut
 
-sub delete_logging
-{
-	my $self = $_[0];
-	my ($logging, $ret);
-	$logging = _get_logging ($$self) or return ($logging);
-	return ($logging->delete ());
-}
+=item new_trustedkeys ()
 
-#                                   END                                        #
-################################# LOGGING ######################################
+ Arguments
+ KEYS	=> [ domain flags protocol algorithm key ]
+ or
+ KEYS	=> [ [ domain flags protocol algorithm key ], [..] ]
+ WHERE  => 'FIRST'|'LAST'|'BEFORE'|'AFTER'
+ WARG   => Unix::Conf::Bind8::Conf::Directive subclass object
+                  # WARG is to be provided only in case WHERE eq 'BEFORE 
+                  # or WHERE eq 'AFTER'
 
-################################# INCLUDE ######################################
-#                                                                              #
+Object method.
+Creates a new Unix::Conf::Bind8::Conf::Trustedkeys object, links it in the
+invocant Conf object and returns it if successful, an Err object otherwise.
+
+=cut
+
+=item get_trustedkeys ()
+
+Object method.
+Returns the Unix::Conf::Bind8::Conf::Trustedkeys object if defined (either 
+through a call to new_trustedkeys or one created when the configuration file 
+is parsed) or Err if none is defined.
+
+=cut
+
+=item delete_trustedkeys ()
+
+Object method
+Deletes the defined (either through a call to new_trustedkeys or one created 
+when the configuration file is parsed) Unix::Conf::Bind8::Conf::Trustedkeys 
+object.
+Returns true if a Unix::Conf::Bind8::Conf::Trustedkeys object is present, an 
+Err object otherwise.
+
+=cut
+
+=item new_controls ()
+
+ Arguments
+ UNIX	=> [ PATH, PERM, OWNER, GROUP ],
+ INET	=> [ ADDR, PORT, ALLOW ]
+ WHERE  => 'FIRST'|'LAST'|'BEFORE'|'AFTER'
+ WARG   => Unix::Conf::Bind8::Conf::Directive subclass object
+                  # WARG is to be provided only in case WHERE eq 'BEFORE 
+                  # or WHERE eq 'AFTER'
+
+Object method.
+ALLOW in INET can either be an Acl object or an anonymous array of elements.
+Creates a new Unix::Conf::Bind8::Conf::Controls object, links it in the invocant
+Conf object if successful, and returns it, an Err object otherwise.
+
+=cut
+
+=item get_controls ()
+
+Object method.
+Returns the Unix::Conf::Bind8::Conf::Controls object if defined (either 
+through a call to new_trustedkeys or one created when the configuration file 
+is parsed) or Err if none is defined.
+
+=cut
+
+=item delete_controls ()
+
+Object method
+Deletes the defined (either through a call to new_trustedkeys or one created 
+when the configuration file is parsed) Unix::Conf::Bind8::Conf::Controls 
+object.
+Returns true if a Unix::Conf::Bind8::Conf::Controls object is present, an 
+Err object otherwise.
+
+=cut
+
+=item new_zone ()
+ 
+ Arguments
+ NAME          => 'zone-name',
+ CLASS         => 'zone-class',        # in|hs|hesiod|chaos
+ TYPE          => 'zone-type',         # master|slave|forward|stub|hint
+ FILE          => 'records-file',
+ MASTERS       => [ qw (10.0.0.1 10.0.0.2) ],
+ FORWARD       => 'value',             # yes|no
+ FORWARDERS    => [ qw (192.168.1.1 192.168.1.2) ],
+ CHECK-NAMES   => 'value'              # fail|warn|ignore
+ ALLOW-UPDATE  => Unix::Conf::Bind8::Conf::Acl object,
+ ALLOW-QUERY   => Unix::Conf::Bind8::Conf::Acl object,
+ ALLOW-TRANSFER=> Unix::Conf::Bind8::Conf::Acl object,
+ NOTIFY        => 'value,              # yes|no
+ ALSO-NOTIFY   => [ qw (10.0.0.3) ],
+ WHERE         => 'FIRST'|'LAST'|'BEFORE'|'AFTER'
+ WARG          => Unix::Conf::Bind8::Conf::Directive subclass object
+                  # WARG is to be provided only in case WHERE eq 'BEFORE 
+                  # or WHERE eq 'AFTER'
+
+Object method.
+Creates and returns a new Unix::Conf::Bind8::Conf::Zone object, links it
+in the invocant Conf object, and returns it, on success, an Err 
+object otherwise.
+
+=cut
+
+=item get_zone ()
+
+ Arguments
+ 'ZONE-NAME',
+
+Object method.
+Returns the Unix::Conf::Bind8::Conf::Zone object representing ZONE-NAME 
+if defined (either through a call to new_zone () or one created when 
+parsing the configuration file), an Err object otherwise.
+
+=cut
+
+=item delete_zone ()
+
+ Arguments
+ 'ZONE-NAME',
+
+Object method.
+Deletes the Unix::Conf::Bind8::Conf::Zone object representing ZONE-NAME 
+if defined (either through a call to new_zone () or one created when 
+parsing the configuration file) and returns true, or returns an Err 
+object otherwise.
+
+=cut
+
+=item zones ()
+
+ Arguments
+ ALL		# Optional
+
+Object method.
+Iterates through a list of defined Unix::Conf::Bind8::Conf::Zone objects 
+(either through a call to new_zone () or ones created when parsing the 
+configuration file), returning one at a time when called in scalar context, 
+or a list of all objects when called in list context.
+Argument ALL can either be 0, no, 1, or yes. When ALL is 1 or 'yes', it
+returns all defined Zone objects across files. Else only those defined
+in the invocant are returned.
+
+=cut
+
+=item new_acl ()
+
+ Arguments
+ NAME      => 'acl-name',				# Optional
+ ELEMENTS  => [ qw (10.0.0.1 10.0.0.2 192.168.1.0/24) ],
+ WHERE     => 'FIRST'|'LAST'|'BEFORE'|'AFTER'
+ WARG      => Unix::Conf::Bind8::Conf::Directive subclass object
+                  # WARG is to be provided only in case WHERE eq 'BEFORE 
+                  # or WHERE eq 'AFTER'
+
+Object method.
+Creates a new Unix::Conf::Bind8::Conf::Acl object, links it in the invocant
+Conf object, on success, an Err object otherwise.
+
+=cut
+
+=item get_acl ()
+
+ Arguments
+ 'ACL-NAME',
+
+Object method.
+Returns the Unix::Conf::Bind8::Conf::Acl object representing 'ACL-NAME' if
+defined (either through a call to new_acl or one created when the 
+configuration file is parsed), an Err object otherwise.
+
+=cut
+
+=item delete_acl ()
+
+ Arguments
+ 'ACL-NAME',
+
+Object method.
+Deletes the Unix::Conf::Bind8::Conf::Acl object representing 'ACL-NAME' 
+if defined (either through a call to new_acl or one created when the 
+configuration file is parsed) and returns true, or returns an Err object 
+otherwise.
+
+=cut
+
+=item acls ()
+
+ Arguments
+ ALL		# Optional
+
+Object method.
+Iterates through the list of defined Unix::Conf::Bind8::Conf::Acl objects 
+(either through a call to new_acl or ones created when parsing the file, 
+returning an object at a time when called in scalar context, or a list of 
+all objects when called in list context.
+Argument ALL can either be 0, no, 1, or yes. When ALL is 1 or 'yes', it
+returns all defined Acl objects across files. Else only those defined
+in the invocant are returned.
+
+=cut
+
+=item new_key
+ 
+ Arguments
+ NAME       => scalar,
+ ALGORITHM  => scalar,	# number
+ SECRET     => scalar,	# quoted string
+ WHERE      => 'FIRST'|'LAST'|'BEFORE'|'AFTER'
+ WARG       => Unix::Conf::Bind8::Conf::Directive subclass object
+                  # WARG is to be provided only in case WHERE eq 'BEFORE 
+                  # or WHERE eq 'AFTER'
+
+Object method.
+Creates a new Unix::Conf::Bind8::Conf::Key object links it in
+the invocant Conf object and returns it, on success, an Err object 
+on failure.
+
+=cut
+
+=item get_key ()
+
+ Arguments
+ 'KEY-NAME',
+
+Object method.
+Returns the Unix::Conf::Bind8::Conf::Key object representing 'KEY-NAME' if
+defined (either through a call to new_key or one created when the 
+configuration file is parsed), an Err object otherwise.
+
+=cut
+
+=item delete_key ()
+
+ Arguments
+ 'KEY-NAME',
+
+Object method.
+Deletes the Unix::Conf::Bind8::Conf::Key object representing 'KEY-NAME' 
+if defined (either through a call to new_key or one created when the 
+configuration file is parsed) and returns true, or returns an Err object 
+otherwise.
+
+=cut
+
+=item keys ()
+
+ Arguments
+ ALL		# Optional
+
+Object method.
+Iterates through the list of defined Unix::Conf::Bind8::Conf::Key objects 
+(either through a call to new_key or ones created when parsing the file, 
+returning an object at a time when called in scalar context, or a list of 
+all objects when called in list context.
+Argument ALL can either be 0, no, 1, or yes. When ALL is 1 or 'yes', it
+returns all defined Key objects across files. Else only those defined
+in the invocant are returned.
+
+=cut
+
+
+=item new_server ()
+
+ Arguments
+ NAME           => scalar,
+ BOGUS          => scalar,	# Optional
+ TRANSFERS      => scalar,	# Optional
+ TRANSFER-FORMAT=> scalar,	# Optional
+ KEYS           => [elements ],	# Optional
+ WHERE          => 'FIRST'|'LAST'|'BEFORE'|'AFTER'
+ WARG           => Unix::Conf::Bind8::Conf::Directive subclass object
+                       # WARG is to be provided only in case WHERE eq 'BEFORE 
+                       # or WHERE eq 'AFTER'
+ 
+Object method.
+Creates a new Unix::Conf::Bind8::Conf::Server object, links it in the invocant
+Conf object and returns it, on success, an Err object otherwise.
+
+=cut
+
+=item get_server ()
+
+ Arguments
+ 'SERVER-NAME',
+
+Object method.
+Returns the Unix::Conf::Bind8::Conf::Server object representing 'SERVER-NAME' if
+defined (either through a call to new_server or one created when the 
+configuration file is parsed), an Err object otherwise.
+
+=cut
+
+=item delete_server ()
+
+ Arguments
+ 'SERVER-NAME',
+
+Object method.
+Deletes the Unix::Conf::Bind8::Conf::Server object representing 'SERVER-NAME' 
+if defined (either through a call to new_server or one created when the 
+configuration file is parsed) and returns true, or returns an Err object 
+otherwise.
+
+=cut
+
+=item servers ()
+
+ Arguments
+ ALL		# Optional
+
+Object method.
+Iterates through the list of defined Unix::Conf::Bind8::Conf::Server objects 
+(either through a call to new_servers or ones created when parsing the file, 
+returning an object at a time when called in scalar context, or a list of 
+all objects when called in list context.
+Argument ALL can either be 0, no, 1, or yes. When ALL is 1 or 'yes', it
+returns all defined Key objects across files. Else only those defined
+in the invocant are returned.
+
+=cut
 
 =item new_include ()
 
  Arguments
  FILE         => 'path of the configuration file',
  SECURE_OPEN  => 0/1,        # default 1 (enabled)
- WHERE		   => 'FIRST'|'LAST'|'BEFORE'|'AFTER'
- WARG		   => Unix::Conf::Bind8::Conf::Directive subclass object
- 				  # WARG is to be provided only in case WHERE eq 'BEFORE 
-				  # or WHERE eq 'AFTER'
+ WHERE        => 'FIRST'|'LAST'|'BEFORE'|'AFTER'
+ WARG         => Unix::Conf::Bind8::Conf::Directive subclass object
+                  # WARG is to be provided only in case WHERE eq 'BEFORE 
+                  # or WHERE eq 'AFTER'
 
 Object method.
 Creates a new Unix::Conf::Bind8::Conf::Include object which contains an 
-Unix::Conf::Bind8::Conf object representing FILE and returns it if 
-successful, or an Err object otherwise. 
+Unix::Conf::Bind8::Conf object representing FILE, links it in the invocant
+Conf object and returns it, on success, an Err object otherwise. 
 
 =cut
-
-sub new_include 
-{
-	my $self = shift ();
-	
-	return (
-		Unix::Conf::Bind8::Conf::Include->new (
-			@_,
-			PARENT => $$self,
-			ROOT => $self->__root ()
-		)
-	);
-}
 
 =item get_include ()
 
@@ -776,15 +1064,6 @@ parsing the configuration file), an Err object otherwise.
 
 =cut
 
-sub get_include
-{
-	my ($self, $name) = @_;
-
-	return (Unix::Conf->_err ('get_include', "name not specified"))
-		unless ($name);
-	return (_get_include ($$self, $name));
-}
-
 =item get_include_conf ()
 
  Arguments
@@ -795,17 +1074,6 @@ Return the Unix::Conf::Bind8::Conf object inside a defined
 Unix::Conf::Bind8::Conf::Include of name INCLUDE-NAME.
 
 =cut
-
-sub get_include_conf
-{
-	my ($self, $name) = @_;
-
-	return (Unix::Conf->_err ('get_include_conf', "name not specified"))
-		unless (defined ($name));
-	my $ret;
-	$ret = _get_include ($$self, $name) or return ($ret);
-	return ($ret->conf ());
-}
 
 =item delete_include ()
 
@@ -820,50 +1088,21 @@ object otherwise.
 
 =cut
 
-sub delete_include
-{
-	my ($self, $name) = @_;
-	my ($include, $ret);
-	return (Unix::Conf->_err ('delete_include', "name not specified"))
-		unless ($name);
-	$include = _get_include ($$self, $name) or return ($include);
-	return ($include->delete ());
-}
-
 =item includes ()
 
  Arguments
- CONTEXT	=> 'ROOT'		# Optional. If this argument is not present
- 							# only INCLUDEs defined in this conf file will
-							# be returned. Else all INCLUDEs defined will
-							# be returned.
+ ALL		# Optional
 
 Object method.
 Iterates through defined Unix::Conf::Bind8::Conf::Include objects (either 
 through a call to new_include () or ones created when parsing the 
 configuration file), returning one at a time when called in scalar context, 
 or a list of all defined includes when called in list context.
+Argument ALL can either be 0, no, 1, or yes. When ALL is 1 or 'yes', it
+returns all defined Include objects across files. Else only those defined
+in the invocant are returned.
+
 =cut
-
-sub includes
-{
-	my $self = shift ();
-	my %args = @_;
-	if ($args{CONTEXT} && $args{CONTEXT} eq 'ROOT') {
-		return (
-			wantarray () ? values (%{$$self->{ROOT}{ALL_INCLUDE}}) : (each (%{$$self->{ROOT}{ALL_INCLUDE}}))[1]
-		);
-	}
-	return (
-		wantarray () ? values (%{$$self->{INCLUDE}}) : (each (%{$$self->{INCLUDE}}))[1]
-	);
-}
-
-#                                   END                                        #
-################################# INCLUDE ######################################
-
-#################################### DB ########################################
-#                                                                              #
 
 =item get_db ()
 
@@ -882,14 +1121,14 @@ sub get_db
 {
 	my ($self, $zone, $secure_open) = @_;
 	my $ret;
+
+	return (Unix::Conf->_err ('get_db', "not a class method"))
+		unless (ref ($self));
 	$secure_open = $self->fh ()->secure_open () 
 		unless (defined ($secure_open));
 	$ret = $self->get_zone ($zone) or return ($ret);
 	return ($ret->get_db ($secure_open));
 }
-
-#                                   END                                        #
-#################################### DB ########################################
 
 #################################  PARSER  #####################################
 #                                                                              #

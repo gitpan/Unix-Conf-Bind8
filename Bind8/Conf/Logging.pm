@@ -17,10 +17,10 @@ directive in a Bind8 Configuration file.
         SECURE_OPEN => 1,
     ) or $conf->die ("couldn't open `named.conf'");
     
-    # get an existing logging object
-    $logging = $conf->get_logging () 
-        or $logging->die ("couldn't get logging");
-    
+    #
+    # Ways to get a Logging object.
+    #
+
     # or create a new logging object
     $logging = $conf->new_logging (
         CHANNELS => [
@@ -56,6 +56,14 @@ directive in a Bind8 Configuration file.
 		WHERE	=> 'FIRST',
     ) or $logging->die ("couldn't create logging");
 
+    # get an existing logging object
+    $logging = $conf->get_logging () 
+        or $logging->die ("couldn't get logging");
+    
+    #
+    # Operations that can be performed on a Logging object.
+    #
+
     # create new channel
     $channel = $logging->new_channel (
         NAME             => 'new_chan',
@@ -68,8 +76,11 @@ directive in a Bind8 Configuration file.
     ) or $channel->die ("couldn't create `new_chan'");
 
     # or get an already defined channel
-    $channel = $logging->get_channel ('my_file_chan)
+    $channel = $logging->get_channel ('my_file_chan')
         or $channel->die ("couldn't get `my_file_chan'");
+
+    $ret = $logging->delete_channel ('my_file_chan')
+		or $ret->die ("couldn't delete channel `my_file_chan'");
 
     # For further operations on channel objects refer to the 
     # documentation for Unix::Conf::Bind8::Conf::Logging::Channel
@@ -83,7 +94,7 @@ directive in a Bind8 Configuration file.
 
     # set channels for categories
     $ret = $logging->category (
-	    'eventlib', [ qw (new_chan default_syslog) ]
+	    qw (eventlib new_chan default_syslog)
     ) or $ret->die ("couldn't set channels for category `eventlib'");
     
     # delete categories
@@ -120,8 +131,23 @@ use Unix::Conf::Bind8::Conf::Logging::Channel;
 =item new ()
 
  Arguments
+ CHANNELS    =>  {
+         NAME             => 'channel-name',
+         OUTPUT           => 'value',        # syslog|file|null
+         FILE             => {               # only if OUTPUT eq 'file'
+		   PATH     => 'file-name',
+		   VERSIONS => number,
+		   SIZE     => size_spec,
+         },
+         SYSLOG           => 'facility-name',# only if OUTPUT eq 'syslog'
+         SEVERITY         => 'severity-name',
+         'PRINT-TIME'     => 'value',        # yes|no
+         'PRINT-SEVERITY' => 'value',        # yes|no
+         'PRINT-CATEGORY' => 'value',        # yes|no
+ }
+ or
  CHANNELS    => [ 
-     { 
+     {
          NAME             => 'channel-name',
          OUTPUT           => 'value',        # syslog|file|null
          FILE             => {               # only if OUTPUT eq 'file'
@@ -139,12 +165,16 @@ use Unix::Conf::Bind8::Conf::Logging::Channel;
  CATEGORIES  => [
      [ CATEGORY-NAME    => [ qw (channel1 channel2) ] ],
  ],
- WHERE		   => 'FIRST'|'LAST'|'BEFORE'|'AFTER'
- WARG		   => Unix::Conf::Bind8::Conf::Directive subclass object
+ WHERE  => 'FIRST'|'LAST'|'BEFORE'|'AFTER'
+ WARG   => Unix::Conf::Bind8::Conf::Directive subclass object
+                        # WARG is to be provided only in case WHERE eq 'BEFORE 
+                        # or WHERE eq 'AFTER'
+ PARENT	=> reference,   # to the Conf object datastructure.
 
 Class constructor.
 Create a new Unix::Conf::Bind8::Conf::Logging object, initialize it, and 
-return it on success, or an Err object on failure.
+return it on success, or an Err object on failure. Do not use this constructor
+directly. Use the Unix::Conf::Bind8::Conf::new_logging () method instead.
 
 =cut
 
@@ -159,7 +189,14 @@ sub new
 	$args{PARENT} || return (Unix::Conf->_err ('new', "PARENT not specified"));
 	$ret = $new->_parent ($args{PARENT}) or return ($ret);
 	if ($args{CHANNELS}) {
-		for (@{$args{CHANNELS}}) {
+		my $channels;
+		if (ref ($args{CHANNELS}) && UNIVERSAL::isa ($args{CHANNELS}, 'HASH')) {
+			$channels = [ $args{CHANNELS} ]
+		}
+		else {
+			$channels = $args{CHANNELS};
+		}
+		for (@{$channels}) {
 			$ret = $new->new_channel (%{$_}) or return ($ret);
 		}
 	}
@@ -179,7 +216,9 @@ sub new
 
  Arguments
  'CATEGORY-NAME',
- [ qw (channel1 channel2) ],      # optional
+ LIST				
+ or 
+ [ LIST ]			# of legal channel names
 
 Object method.
 Get/Set the object's channel attribute. If the an array reference is passed
@@ -194,17 +233,31 @@ an Err object otherwise.
 
 sub category
 {
-	my ($self, $category, $channels) = @_;
+	my $self = shift ();
+	my $category = shift ();
 
 	return (Unix::Conf->_err ('category', "illegal category `$category'"))
 		unless (__valid_category ($category));
-	if ($channels) {
-		my $ret;
+	if (@_) {
+		my ($channels, $ret, $chan);
+		if (ref ($_[0])) {
+			return (Unix::Conf->_err ('category', "expected arguments LIST or [ LIST ]"))
+				unless (UNIVERSAL::isa ($_[0], 'ARRAY'));
+			$channels = $_[0];
+		}
+		else {
+			$channels = \@_;
+		}
 		for (@$channels) {
 			$ret = __valid_channel ($self, $_) or return ($ret)
 		}
+
 		for (@$channels) {
 			$self->{categories}{$category}{$_} = 1;
+			# don't set for predef channels as we can't get them
+			next if (_is_predef_channel ($_));
+			$chan = $self->get_channel ($_) or return ($chan);
+			$ret = $chan->_add_category ($category) or return ($ret);
 		}
 		$self->dirty (1);
 		return (1);
@@ -214,6 +267,93 @@ sub category
 			[ keys (%{$self->{categories}{$category}}) ] : 
 			Unix::Conf->_err ('category', "category `$category' not defined")
 	);
+}
+
+=item add_to_category ()
+
+ Arguments
+ category,
+ LIST		# of channel names
+
+Object method.
+Adds to the channels defined for category `categtory' and returns true on success,
+an Err object otherwise.
+
+=cut
+
+sub add_to_category
+{
+	my $self = shift ();
+	my $category = shift ();
+	my ($ret, $chan);
+
+	return (Unix::Conf->_err ("add_to_category", "illegal category `$category'"))
+		unless (__valid_category ($category));
+	return (Unix::Conf->_err ("add_to_category", "channels to be added not passed"))
+		unless (@_);
+
+	for (@_) {
+		$ret = __valid_channel ($self, $_) or return ($ret);
+		return (Unix::Conf->_err ("add_to_category", "channel `$_' already defined for $category"))
+			if ($self->{categories}{$category}{$_});
+	}
+
+	# set categories used for channel
+	for (@_) {
+		# don't set for predef channels as we can't get them
+		next if (_is_predef_channel ($_));
+		$chan = $self->get_channel ($_) or return ($chan);
+		$ret = $chan->_add_category ($category) or return ($ret);
+	}
+
+	@{$self->{categories}{$category}}{@_} = (1) x @_;
+	$self->dirty (1);
+	return (1);
+}
+
+=item delete_from_category ()
+
+ Arguments
+ category,
+ LIST		# of channel names
+
+Object method.
+Deletes from the channels defined for category `category' and returns true on success,
+an Err object otherwise. If all the channels defined for that category is deleted, 
+the category itself is deleted.
+
+=cut
+
+sub delete_from_category
+{
+	my $self = shift ();
+	my $category = shift ();
+	my ($ret, $chan);
+
+	return (Unix::Conf->_err ("delete_from_category", "illegal category `$category'"))
+		unless (__valid_category ($category));
+	return (Unix::Conf->_err ("delete_from_category", "channels to be added not passed"))
+		unless (@_);
+
+	for (@_) {
+		$ret = __valid_channel ($self, $_) or return ($ret);
+		return (Unix::Conf->_err ("delete_from_category", "channel `$_' not defined for $category"))
+			unless ($self->{categories}{$category}{$_});
+	}
+
+	# delete categories used for channel
+	for (@_) {
+		# don't set for predef channels as we can't get them
+		next if (_is_predef_channel ($_));
+		$chan = $self->get_channel ($_) or return ($chan);
+		$ret = $chan->_delete_category ($category) or return ($ret);
+	}
+
+	delete (@{$self->{categories}{$category}}{@_});
+	delete ($self->{categories}{$category})
+		unless (keys (%{$self->{categories}{$category}}));
+	$self->dirty (1);
+	return (1);
 }
 
 =item delete_category ()
@@ -235,7 +375,7 @@ sub delete_category
 		unless (__valid_category ($category));
 	return (Unix::Conf->_err ('delete_category', "`$category' not explicitly defined"))
 		unless (defined ($self->{categories}{$category}));
-	undef ($self->{categories}{$category});
+	delete ($self->{categories}{$category});
 	$self->dirty (1);
 	return (1);
 }
@@ -260,13 +400,11 @@ sub categories
 
 # put this in the logging object later on, since it doesn't have to be shared
 # across conf objects
-my %Channels;
 
 =item new_channel ()
 
  Arguments
- [
-     {
+ {
          NAME             => 'channel-name',
          OUTPUT           => 'value',        # syslog|file|null
          FILE             => 'file-name',    # only if OUTPUT eq 'file'
@@ -275,8 +413,7 @@ my %Channels;
          'PRINT-TIME'     => 'value',        # yes|no
          'PRINT-SEVERITY' => 'value',        # yes|no
          'PRINT-CATEGORY' => 'value',        # yes|no
-     },
- ],
+ }
 
 Object method.
 This method is a wrapper around the class constructor for 
@@ -328,7 +465,7 @@ sub delete_channel
 {
 	my ($self, $name) = @_;
 	my $channel;
-	$channel = _get_channel ($self->_parent (), $name) or return ($channel);
+	$channel = _get_channel ($self, $name) or return ($channel);
 	return ($channel->delete ());
 }
 
@@ -344,7 +481,7 @@ all defined objects when called in list context.
 sub channels
 {
 	return (
-		wantarray () ? values (%Channels) : (each (%Channels))[1]
+		wantarray () ? values (%{$_[0]->{channels}}) : (each (%{$_[0]->{channels}}))[1]
 	);
 }
 
@@ -353,41 +490,39 @@ sub _add_channel
 	my $obj = $_[0];
 	
 	my ($name, $parent);
-	return (Unix::Conf->_err ("_add_channel", "Channel object not specified"))
+	return (Unix::Conf->_err ("_add_channel", "channel object not specified"))
 		unless ($obj);
 	$name = $obj->name () or return ($name);
 	$parent = $obj->_parent () or return ($parent);
-	return (Unix::Conf->_err ("_add_channel", "Channel `$name' already defined"))
-		if ($parent->{CHANNEL}{$name});
-	$parent->{CHANNEL}{$name} = $obj;
+	return (Unix::Conf->_err ("_add_channel", "channel `$name' already defined"))
+		if ($parent->{channels}{$name});
+	$parent->{channels}{$name} = $obj;
 	return (1);
 }
 
 sub _get_channel
 {
-	my ($parent, $name) = @_;
+	my ($self, $name) = @_;
 
-	return (Unix::Conf->_err ("_get_channel", "Channel name not specified"))
+	return (Unix::Conf->_err ("_get_channel", "channel name not specified"))
 		unless ($name);
-	return (Unix::Conf->_err ("_add_channel", "Channel `$name' not defined"))
-		unless ($parent->{CHANNEL}{$name});
-	return ($parent->{CHANNEL}{$name});
+	return (Unix::Conf->_err ("_get_channel", "channel `$name' not defined"))
+		unless ($self->{channels}{$name});
+	return ($self->{channels}{$name});
 }
 
 sub _del_channel
 {
-	my $obj = $_[0];
+	my ($logging, $name) = @_;
 	
-	my ($name, $parent);
-	return (Unix::Conf->_err ("_del_channel", "Channel object not specified"))
-		unless ($obj);
-	$name = $obj->name () or return ($name);
+	return (Unix::Conf->_err ("_del_channel", "channel object not specified"))
+		unless ($name);
 	return (Unix::Conf->_err ('_del_channel', "channel `$name' is predefined, cannot be deleted"))
 		if (_is_predef_channel ($name));
-	$parent = $obj->_parent () or return ($parent);
-	return (Unix::Conf->_err ("_del_channel", "Channel `$name' not defined"))
-		unless ($parent->{CHANNEL}{$name});
-	$parent->{CHANNEL}{$name} = undef;
+	return (Unix::Conf->_err ("_del_channel", "channel `$name' not defined"))
+		unless ($logging->{channels}{$name});
+	delete ($logging->{channels}{$name});
+	return (1);
 }
 
 sub _is_predef_channel
@@ -420,7 +555,7 @@ sub __render
 	$rendered = "logging {\n";
 	
 	# render all channels
-	for (values (%Channels)) {
+	for (values (%{$self->{channels}})) {
 		$rendered .= $_->__render ();
 	}
 
@@ -431,7 +566,7 @@ sub __render
 		local $" = "; ";
 		$rendered .= "\tcategory $_ { @$channels };\n"
 	}
-	$rendered .= "};\n";
+	$rendered .= "};";
 	return ($self->_rstring (\$rendered));
 }
 

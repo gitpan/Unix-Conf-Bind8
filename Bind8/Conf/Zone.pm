@@ -9,11 +9,65 @@ directive
 
 =head1 SYNOPSIS
 
-	Refer to the SYNOPSIS section in Unix::Conf::Bind8 for an overview.
+    use Unix::Conf::Bind8;
 
-=head1 DESCRIPTION
+    my ($conf, $zone, $acl, $db, $ret);
+    $conf = Unix::Conf::Bind8->new_conf (
+        FILE        => '/etc/named.conf',
+        SECURE_OPEN => 1,
+    ) or $conf->die ("couldn't open `named.conf'");
 
-=over 4
+    #
+    # Ways to get a Zone object.
+    #
+	
+    $zone = $conf->new_zone (
+        NAME	=> 'extremix.net',
+        TYPE	=> 'master',
+        FILE	=> 'db.extremix.net',
+    ) or $zone->die ("couldn't create zone");
+
+    # OR
+
+    $zone = $conf->get_zone ('extremix.net')
+        or $zone->die ("couldn't get zone");
+		
+	#
+	# Operations that can be performed on a Zone object.
+	#
+
+    $ret = $zone->type ('slave') $ret->die ("couldn't change type");
+    $ret = $zone->masters (qw (192.168.1.1 192.168.1.2))
+        or $ret->die ("couldn't set masters");
+
+    # create a new acl to be defined before the zone directive
+    # 'extremix.net'.
+    $acl = $conf->new_acl (
+        NAME     => 'extremix.com-slaves', 
+        ELEMENTS => [ qw (element1 element2) ],
+        WHERE	 => 'BEFORE',
+        WARG	 => $zone,
+    ) or $acl->die ("couldn't create `extremix.com-slaves'");
+
+    $ret = $zone->allow_transfer ('extremix.com-slaves')
+        or $ret->die ("couldn't set `allow-transfer'");
+	
+    $ret = $zone->delete_allow_update ()
+        or $ret->die ("couldn't delete `allow-update'");
+
+    $db = $zone->get_db () or $db->die ("couldn't get db");
+    # Refer to documentation for Unix::Conf::Bind8::DB
+    # for manipulating the DB file.
+
+    # delete 
+	$ret = $zone->delete () or $ret->die ("couldn't delete");
+
+    # OR
+
+	$ret = $conf->delete_zone ('extremix.net')
+		or $ret->die ("couldn't delete zone `extremix.net'");
+
+=head1 METHODS
 
 =cut
 
@@ -81,14 +135,19 @@ sub __render
 		if (($tmp = $self->file ()));
 	if (($tmp = $self->masters ())) {
 		local $" = "; ";
-		$rendered .= sprintf (qq (\tmasters %s{\n\t\t@{$tmp};\n\t};\n), ($self->masters_port ()) ? "port @{[$self->masters_port ()]} " : "");
+		$rendered .= sprintf (qq (\tmasters %s{\n\t\t@{$tmp->[1]};\n\t};\n), 
+			defined ($tmp->[0]) ? "port $tmp->[0] " : "");
 	}
 
 	$rendered .= qq (\tforward $tmp;\n)
 		if (($tmp = $self->forward ()));
+	# list can be empty.
 	if (($tmp = $self->forwarders ())) {
 		local $" = "; ";
-		$rendered .= qq (\tforwarders {\n\t\t@{$tmp};\n\t};\n);
+		$rendered .= qq (\tforwarders {);
+		# the array might be empty. print `{};' in such cases
+		$rendered .= qq (\n\t\t@{$tmp};\n\t) if (@$tmp);
+		$rendered .= qq (};\n);
 	}
 
 	$rendered .= qq (\tcheck-names $tmp;\n)
@@ -96,26 +155,61 @@ sub __render
 
 	$rendered .= qq (\tnotify $tmp;\n)
 		if (($tmp = $self->notify ()));
+	# list can be empty
 	if (($tmp = $self->also_notify ())) {
 		local $" = "; ";
-		$rendered .= qq (\talso-notify {\n\t\t@{$tmp};\n\t};\n);
+		$rendered .= qq (\talso-notify {);
+		$rendered .= qq (\n\t\t@{$tmp};\n\t) if (@$tmp);
+		$rendered .= qq (};\n);
 	}
 
 	# The values are represented by an ACL. Get the elements, stringify it
 	# and set the ACL to clean, so that the destructors do not write it to file
 	{
-		local $" = "; ";
-		$rendered .= qq (\tallow-update {\n\t\t@{$tmp->elements ()};\n\t};\n)
+		$rendered .= "\tallow-update " . ${$tmp->_rstring (undef, 1)} . "\n"
 			if (($tmp = $self->allow_update ())); 
-		$rendered .= qq (\tallow-query {\n\t\t@{$tmp->elements ()};\n\t};\n)
+		$rendered .= "\tallow-query " . ${$tmp->_rstring (undef, 1)} . "\n"
 			if (($tmp = $self->allow_query ()));
-		$rendered .= qq (\tallow-transfer {\n\t\t@{$tmp->elements ()};\n\t};\n)
+		$rendered .= "\tallow-transfer " . ${$tmp->_rstring (undef, 1)} . "\n"
 			if (($tmp = $self->allow_transfer ()));
 	}
+	#local $" = " ";
+	$rendered .= qq/\tpubkey @{$tmp}[0..2] "$tmp->[3]";\n/
+		if ($tmp = $self->pubkey ());
 
-	$rendered .= "};\n";
+	$rendered .= "};";
 	return ($self->_rstring (\$rendered));
 }
+
+
+my %ZoneDirectives = (
+	'forward'			=> \&__valid_yesno,
+	'notify'			=> \&__valid_yesno,
+	'dialup'			=> \&__valid_yesno,
+	'check-names'		=> \&__valid_checknames,
+	'transfer-source'	=> \&__valid_ipaddress,
+	'max-transfer-time-in'
+						=> \&__valid_number,
+
+	'also-notify'		=> 'IPLIST',
+	'forwarders'		=> 'IPLIST',
+
+
+	'allow-transfer'	=> 'acl',
+	'allow-query'		=> 'acl',
+	'allow-update'		=> 'acl',
+
+	# can't delete the 'name' attribute
+	'name'				=> 0,
+	'file'				=> 1,
+	'class'				=> 1,
+	'type'				=> 1,
+	'masters'			=> 1,
+	'pubkey'			=> 1,
+);
+
+
+=over 4
 
 =item new ()
 
@@ -124,7 +218,10 @@ sub __render
  TYPE             => 'type',            # 'master'|'slave'|'forward'|'stub'|'hint'
  CLASS            => 'class',           # 'in'|'hs'|'hesiod'|'chaos'
  FILE             => 'pathname',
- MASTERS          => [ qw (ip1 ip2) ],  # only if TYPE =~  /'slave'|'stub'/
+ MASTERS          => { 					# only if TYPE =~  /'slave'|'stub'/
+ 						PORT => 'port'	# optional
+						ADDRESS => [ qw (ip1 ip2) ],
+					 },	
  FORWARD          => 'yes_no',
  FORWARDERS       => [ qw (ip1 ip2) ],
  CHECK-NAMES      => 'value',           # 'warn'|'fail'|'ignore'
@@ -134,12 +231,16 @@ sub __render
  DIALUP           => 'yes_no',
  NOTIFY           => 'yes_no',
  ALSO-NOTIFY      => [ qw (ip1 ip2) ],
+ WHERE  => 'FIRST'|'LAST'|'BEFORE'|'AFTER'
+ WARG   => Unix::Conf::Bind8::Conf::Directive subclass object
+                        # WARG is to be provided only in case WHERE eq 'BEFORE 
+                        # or WHERE eq 'AFTER'
+ PARENT	=> reference,   # to the Conf object datastructure.
 
 Class constructor
 Creates a new Unix::Conf::Bind8::Conf::Zone object and returns 
-it if successful, an Err object otherwise. Direct use of this 
-method is deprecated. Use Unix::Conf::Bind8::Conf::new_zone () 
-instead.
+it if successful, an Err object otherwise. Do not use this constructor
+directly. Use Unix::Conf::Bind8::Conf::new_zone () instead.
 
 =cut
 
@@ -150,52 +251,28 @@ sub new
 	my %args = @_;
 	my ($ret, $acl);
 	
-	$args{NAME} || return (Unix::Conf->_err ('new', "zone name not specified"));
-	$args{PARENT} || return (Unix::Conf->_err ('new', "PARENT not specified"));
-
+	$args{NAME} || return (Unix::Conf->_err ('new', "zone name not defined"));
+	$args{PARENT} || return (Unix::Conf->_err ('new', "PARENT not defined"));
+	my $where = $args{WHERE} ? $args{WHERE} : 'LAST';
+	my $warg = $args{WARG};
 	$ret = $new->_parent ($args{PARENT}) or return ($ret);
 	$ret = $new->name ($args{NAME}) or return ($ret);
+	delete (@args{'NAME','PARENT','WHERE','WARG'});
 
-	$ret = $new->type ($args{TYPE}) or return ($ret)
-		if ($args{TYPE});
-	$ret = $new->class ($args{CLASS}) or return ($ret)
-		if ($args{CLASS});
-	$ret = $new->file ($args{FILE}) or return ($ret) 
-		if ($args{FILE});
-	$ret = $new->masters ($args{MASTERS}) or return ($ret) 
-		if ($args{MASTERS});
-	$ret = $new->forward ($args{FORWARD}) or return ($ret)
-		if ($args{FORWARD});
-	$ret = $new->forwarders ($args{FORWARDERS}) or return ($ret)
-		if ($args{FORWARDERS});
-	$ret = $new->check_names ($args{'CHECK-NAMES'}) or return ($ret)
-		if ($args{'CHECK-NAMES'});
-
-	if ($args{'ALLOW-UPDATE'}) {
-		$acl = Unix::Conf::Bind8::Conf::Acl->new (ELEMENTS => $args{'ALLOW-UPDATE'})
-			or return ($acl);
-		$ret = $new->allow_update ($acl) or return ($ret)
+	# now what is left in %args are zone attributes.
+	for (keys (%args)) {
+		my $meth = $_;
+		$meth =~ tr/A-Z/a-z/;
+		return (Unix::Conf->_err ("new", "attribute `$meth' not supported"))
+			unless (defined ($ZoneDirectives{$meth}));
+		$meth =~ tr/-/_/;
+		($_ eq 'MASTERS')	&& do {
+			$ret = $new->$meth (%{$args{$_}}) or return ($ret);
+			next;
+		};
+		$ret = $new->$meth ($args{$_}) or return ($ret);
 	}
-	if ($args{'ALLOW-QUERY'}) {
-		$acl = Unix::Conf::Bind8::Conf::Acl->new (ELEMENTS => $args{'ALLOW-QUERY'})
-			or return ($acl);
-		$ret = $new->allow_query ($acl) or return ($ret)
-	}
-	if ($args{'ALLOW-TRANSFER'}) {
-		$acl = Unix::Conf::Bind8::Conf::Acl->new (ELEMENTS => $args{'ALLOW-TRANSFER'})
-			or return ($acl);
-		$ret = $new->allow_transfer ($acl) or return ($ret)
-	}
-
-	$ret = $new->dialup ($args{DIALUP}) or return ($ret)
-		if ($args{DIALUP});
-	$ret = $new->notify ($args{NOTIFY}) or return ($ret)
-		if ($args{NOTIFY});
-	$ret = $new->also_notify ($args{'ALSO-NOTIFY'}) or return ($ret)
-		if ($args{'ALSO-NOTIFY'});
-
-	$args{WHERE} = 'LAST' unless ($args{WHERE});
-	$ret = Unix::Conf::Bind8::Conf::_insert_in_list ($new, $args{WHERE}, $args{WARG})
+	$ret = Unix::Conf::Bind8::Conf::_insert_in_list ($new, $where, $warg)
 		or return ($ret);
 	return ($new);
 }
@@ -233,7 +310,7 @@ sub name
 	return ($self->{name});
 }
 
-=item class
+=item class ()
 
  Arguments
  'class',     # optional
@@ -252,8 +329,8 @@ sub class
 
 	if (defined ($class)) {
 		return (Unix::Conf->_err ('class', "illegal class `$class'"))
-			if ($class !~ /^(in|hs|hesoid|chaos)$/);
-		$self->{class} = $class;
+			if ($class !~ /^(in|hs|hesoid|chaos)$/i);
+		$self->{class} = lc ($class);
 		return (1);
 	}
 	return ( defined ($self->{class}) ? $self->{class} : "IN" );
@@ -261,7 +338,7 @@ sub class
 
 sub __defined_class { return ( defined ($_[0]->{class}) ); }
 
-=item file
+=item file ()
 
  Arguments
  'file',    # optional
@@ -317,66 +394,566 @@ sub type
 	return ($self->{type});
 }
 
-=item add_masters ()
+=item forward ()
+
+=item notify ()
+
+=item dialup ()
 
  Arguments
- [ qw (ip1 ip2) ],
+ SCALAR,		# 'yes'|'no'|0|1
 
-Object method.
-Add the list of IP addresses specified in the argument to the list of 
-masters and return true if successful, an Err object otherwise.
+Object method
+Get/set corresponding attribute in the invocant. If argument is passed,
+the method tries to set it as the value and returns true if successful,
+an Err object otherwise. If no argument is passed the value of that
+attribute is returned if defined, an Err object otherwise.
 
 =cut
 
-sub add_masters 
-{
-	my ($self, $addresses) = @_;
+=item check_names ()
 
-	if (defined ($addresses)) {
-		for (@$addresses) {
-			return (Unix::Conf->_err ('add_masters', "illegal IP address `$_'"))
-				if (! __valid_ipaddress ($_));
-		}
-		push (@{$self->{masters}[1]}, @$addresses);
-		$self->dirty (1);
-		return (1);
-	}
-	return (Unix::Conf->_err ('add_masters', "addresses to be added not specified"));
+ Arguments
+ string,		# 'warn'|'fail'|'ignore'
+
+Object method
+Get/set corresponding attribute in the invocant. If argument is passed,
+the method tries to set it as the value and returns true if successful,
+an Err object otherwise. If no argument is passed the value of that
+attribute is returned if defined, an Err object otherwise.
+
+=cut
+
+=item transfer_source ()
+
+ Arguments
+ string,		# IPv4 address in dotted quad notation
+
+Object method
+Get/set corresponding attribute in the invocant. If argument is passed,
+the method tries to set it as the value and returns true if successful,
+an Err object otherwise. If no argument is passed the value of that
+attribute is returned if defined, an Err object otherwise.
+
+=cut
+
+=item max_transfer_time_in ()
+
+ Arguments
+ number,		
+
+Object method
+Get/set corresponding attribute in the invocant. If argument is passed,
+the method tries to set it as the value and returns true if successful,
+an Err object otherwise. If no argument is passed the value of that
+attribute is returned if defined, an Err object otherwise.
+
+=cut
+
+=item also_notify ()
+
+=item forwarders ()
+
+ Arguments
+ LIST			# List of IPv4 addresses in 
+ or 			# dotted quad notation
+ [ LIST ]
+
+Object method.
+Get/set the corresponding attribute in the invoking object. If argument(s)
+is/are passed, the method tries to set the attribute and returns true
+on success, an Err object otherwise. If no arguments are passed then
+the method tries to return an array reference if the attribute is defined,
+an Err object otherwise.
+
+=cut
+
+=item add_to_also_notify ()
+
+=item add_to_forwarders ()
+
+=item add_to_masters ()
+
+ Arguments
+ LIST			# List of IPv4 addresses in
+ or				# dotted quad notation.
+ [ LIST ]
+
+Object method.
+Add the elements of the list to the corresponding attribute. Return
+true on success, an Err object otherwise.
+
+=cut
+
+=item delete_from_also_notify ()
+
+=item delete_from_forwarders ()
+
+=item delete_from_masters ()
+
+ Arguments
+ LIST			# List of IPv4 addresses in
+ or				# dotted quad notation.
+ [ LIST ]
+
+Object method.
+Delete elements of the list from the corresponding attribute. Return
+true on success, an Err object otherwise.
+
+=cut
+
+=item allow_transfer ()
+
+=item allow_query ()
+
+=item allow_update ()
+
+ Arguments
+ Acl object,
+ or
+ LIST
+ or 
+ [ LIST ]
+
+Object method.
+If argument(s) is/are passed, tries to set the elements of the corresponding
+attribute and returns true on success, an Err object otherwise. If no
+arguments are passed, tries to return the elements defined for that attribute
+as an anonymous array, if defined, an Err object otherwise.
+
+=cut
+
+=item add_to_allow_transfer ()
+
+=item add_to_allow_query ()
+
+=item add_to_allow_update ()
+
+=item delete_from_allow_transfer ()
+
+=item delete_from_allow_query ()
+
+=item delete_from_allow_update ()
+
+ Arguments
+ LIST
+ [ LIST ]
+
+Object method.
+Add to/delete from elements defined for the corresponding attributes.
+Returns true on success, an Err object otherwise.
+
+=cut
+
+=item delete_forward ()
+
+=item delete_notify ()
+
+=item delete_dialup ()
+
+=item delete_check_names ()
+
+=item delete_transfer_source ()
+
+=item delete_max_transfer_time_in ()
+
+=item delete_also_notify ()
+
+=item delete_forwarders ()
+
+=item delete_allow_transfer ()
+
+=item delete_allow_query ()
+
+=item delete_allow_update ()
+
+=item delete_file ()
+
+=item delete_class ()
+
+=item delete_type ()
+
+=item delete_masters ()
+
+=item delete_also_notify ()
+
+=item delete_forwarders ()
+
+=item delete_pubkey ()
+
+Object method.
+Deletes the corresponding attribute, if defined and returns true,
+an Err object otherwise.
+
+=cut
+
+for my $dir (keys (%ZoneDirectives)) {
+	no strict 'refs';
+
+	my $meth;
+	($meth = $dir) =~ tr/-/_/;
+
+	($ZoneDirectives{$dir} eq 'IPLIST')	&& do {
+		*$meth = sub {
+			my $self = shift ();
+			my $addresses;
+
+			if (@_) {
+				if (ref ($_[0])) {
+					return (
+						Unix::Conf->_err (
+							"$meth", 
+							"expected arguments are a list or an array reference"
+						)
+					) unless (UNIVERSAL::isa ($_[0], 'ARRAY'));
+					$addresses = $_[0];
+				}
+				else {
+					$addresses = \@_;
+				}
+				for (@$addresses) {
+					return (Unix::Conf->_err ("$meth", "illegal IP address `$_'"))
+						if (! __valid_ipaddress ($_));
+				}
+				# reinit
+				$self->{$dir} = undef;
+				@{$self->{$dir}}{@$addresses} = (1) x @$addresses;
+				$self->dirty (1);
+				return (1);
+			}
+
+			return (
+				defined ($self->{$dir}) ? [ keys (%{$self->{$dir}}) ] :
+					Unix::Conf->_err ("$meth", "zone directive `$dir' not defined")
+			)
+		};
+
+		*{"add_to_$meth"} = sub {
+			my $self = shift ();
+			my $addresses;
+
+			if (@_) {
+				if (ref ($_[0])) {
+					return (
+						Unix::Conf->_err (
+							"add_to_$meth", 
+							"expected arguments are a list or an array reference"
+						)
+					) unless (UNIVERSAL::isa ($_[0], 'ARRAY'));
+					$addresses = $_[0];
+				}
+				else {
+					$addresses = \@_;
+				}
+				for (@$addresses) {
+					return (Unix::Conf->_err ("add_to_$meth", "illegal IP address `$_'"))
+						if (! __valid_ipaddress ($_));
+					return (
+						Unix::Conf->_err ( "add_to_$meth", "address `$_' already defined" )
+					) if ($self->{$dir}{$_});
+				}
+				@{$self->{$dir}}{@$addresses} = (1) x @$addresses;
+				$self->dirty (1);
+				return (1);
+			}
+			return (Unix::Conf->_err ("add_to_$meth", "addresses to be added not passed"));
+		};
+
+		*{"delete_from_$meth"} = sub {
+			my $self = shift ();
+			my $addresses;
+
+			if (@_) {
+				if (ref ($_[0])) {
+					return (
+						Unix::Conf->_err (
+							"delete_from_$meth", 
+							"expected arguments are a list or an array reference"
+						)
+					) unless (UNIVERSAL::isa ($_[0], 'ARRAY'));
+					$addresses = $_[0];
+				}
+				else {
+					$addresses = \@_;
+				}
+				for (@$addresses) {
+					return (Unix::Conf->_err ("delete_from_$meth", "illegal IP address `$_'"))
+						if (! __valid_ipaddress ($_));
+					return (
+						Unix::Conf->_err ( "delete_from_$meth", "address `$_' not defined" )
+					) unless ($self->{$dir}{$_});
+				}
+				delete (@{$self->{$dir}}{@$addresses});
+				# if no keys left delete the zone directive itself
+				delete ($self->{$dir})
+					unless (keys (%{$self->{$dir}}));
+				$self->dirty (1);
+				return (1);
+			}
+			return (Unix::Conf->_err ("delete_from_$meth", "addresses to be deleted not passed"));
+		};
+		goto CREATE_DELETE;
+	};
+
+	# zone directives taking Acl as arguments.
+	($ZoneDirectives{$dir} eq 'acl')	&& do {
+		*$meth = sub {
+			my $self = shift ();
+			my $elements;
+
+			if (@_) {
+				if (ref ($_[0])) {
+					if (UNIVERSAL::isa ($_[0], 'Unix::Conf::Bind8::Conf::Acl')) {
+						# Acl object passed
+						$self->{$dir} = $_[0];
+						$self->dirty (1);
+						return (1);
+					}
+					elsif (UNIVERSAL::isa ($_[0], 'ARRAY')) {
+						# array ref was passed
+						return (Unix::Conf->_err ("$meth", "array passed by reference empty"))
+							unless (@{$_[0]});
+						$elements = $_[0];
+					}
+					else {
+						return (	
+							Unix::Conf->_err (
+								"$meth", 
+								"expected arguments are a list, an Unix::Conf::Bind8::Conf::Acl object or an array ref"
+							)
+						);
+					}
+				}
+				else {
+					# assume a list of elements to be set was passed.
+					$elements = \@_;
+				}
+
+				my $acl;
+				$acl = Unix::Conf::Bind8::Conf::Acl->new (
+					PARENT => $self->_parent (), ELEMENTS => $elements,
+				) or return ($acl);
+				$self->{$dir} = $acl;
+				$self->dirty (1);
+				return (1);
+			}
+			return (
+				defined ($self->{$dir}) ? 
+					$self->{$dir} : 
+					Unix::Conf->_err ("$meth", "zone directive `$dir' not defined")
+			);
+		};
+
+		# add_to_* counterpart for options taking ACL elements as arguments
+		*{"add_to_$meth"} = sub {
+			my $self = shift ();
+			my ($elements, $ret);
+
+			return (Unix::Conf->_err ("add_to_$meth", "elements to be added not passed"))
+				unless (@_);
+
+			if (ref ($_[0])) {
+				return (
+					Unix::Conf->_err (
+						"add_to_$meth", 
+						"expected arguments are either a list of elements or an array ref")
+				) unless (UNIVERSAL::isa ($_[0], 'ARRAY'));
+				return (Unix::Conf->_err ("add_to_$meth", "array passed by reference empty"))
+					unless (@{$_[0]});
+				$elements = $_[0];
+			}
+			else {
+				$elements = [ @_ ];
+			}
+			$self->{$dir} = Unix::Conf::Bind8::Conf::Acl->new (
+				PARENT => $self->_parent ()
+			) unless (defined ($self->{$dir}));
+			$ret = $self->{$dir}->add_elements ($elements) or return ($ret);
+			$self->dirty (1);
+			return (1);
+		};
+
+		# delete_from_* counterpart for options taking ACL elements as arguments
+		*{"delete_from_$meth"} = sub {
+			my $self = shift ();
+			my ($elements, $ret);
+
+			return (Unix::Conf->_err ("delete_from_$meth", "elements to be added not passed"))
+				unless (@_);
+
+			if (ref ($_[0])) {
+				return (
+					Unix::Conf->_err (
+						"delete_from_$meth", 
+						"expected arguments are either a list of elements or an array ref")
+				) unless (UNIVERSAL::isa ($_[0], 'ARRAY'));
+				return (Unix::Conf->_err ("delete_from_$meth", "array passed by reference empty"))
+					unless (@{$_[0]});
+				$elements = $_[0];
+			}
+			else {
+				$elements = [ @_ ];
+			}
+
+			return (Unix::Conf::->_err ("delete_from_$meth", "zone directive `$dir' not defined"))
+				unless (defined ($self->{$dir}));
+			$ret = $self->{$dir}->delete_elements ($elements) or return ($ret);
+			# if all elements have been deleted, delete the option itself.
+			delete ($self->{$dir})
+				unless (@{$self->{$dir}->elements ()});
+			$self->dirty (1);
+			return (1);
+		};
+		# *_elements
+		*{"${meth}_elements"} = sub {
+			return (
+				defined ($_[0]->{$dir}) ? $_[0]->{$dir}->elements () : 
+					Unix::Conf->_err ("{$meth}_elements", "zone directive $dir not defined")
+			);
+		};
+		goto CREATE_DELETE;
+	};
+
+	("$ZoneDirectives{$dir}" =~ /^CODE/)	&& do {
+		*$meth = sub {
+				my ($self, $arg) = @_;
+				
+				if (defined ($arg)) {
+					return (Unix::Conf->_err ("$meth", "invalid argument $arg"))
+						unless (&{$ZoneDirectives{$dir}}($arg));
+					$self->{$dir} = $arg;
+					$self->dirty (1);
+					return (1);
+				}
+				return (
+					defined ($self->{$dir}) ? 
+					$self->{$dir} : 
+					Unix::Conf->_err ("$meth", "zone directive `$dir' not defined")
+				);
+		};
+	};
+CREATE_DELETE:
+	# delete_* to be created only for directives which have true value.
+	# will not be created for name.
+	($ZoneDirectives{$dir})					&& do {
+		*{"delete_$meth"} = sub {
+			return (Unix::Conf->_err ("delete_$meth", "zone directive `$dir' not defined"))
+				unless (defined ($_[0]->{$dir}));
+			delete ($_[0]->{$dir});
+			$_[0]->dirty (1);
+			return (1);
+		};
+	};
 }
 
 =item masters ()
 
  Arguments
- [ qw (ip1 ip2) ],
+ PORT		=> port,	# optional
+ ADDRESS	=> [ LIST ],
 
 Object method.
-Get/Set the object's masters attribute. If argument is passed, the method 
-tries to set the masters attribute to the list, and returns true if 
-successful, an Err object otherwise. If no argument is passed, returns 
-an array ref containing the masters list for zone, if defined, an Err 
-object otherwise.
+Get/sets the 'masters' attribute. If argument is passed, the
+attribute is set to the argument and returns true on success, 
+an Err object otherwise. If not the attribute value is returned 
+in the form of an anonymous array 
+([ PORT, [ LIST OF ADDRESSES ] ]), if defined, an Err object 
+otherwise.
 
 =cut
 
 sub masters
 {
-	my ($self, $addresses) = @_;
-
-	if (defined ($addresses)) {
-		for (@$addresses) {
-			return (Unix::Conf->_err ('masters', "illegal IP address `$_'"))
+	my $self = shift ();
+	
+	if (@_) {
+		my %args = ( @_ );
+		
+		$self->{masters} = undef;
+		if (defined ($args{PORT})) {
+			return (Unix::Conf->_err ("masters", "illegal PORT `$args{PORT}'"))
+				unless (__valid_port ($args{PORT}));
+			$self->{masters}[0] = $args{PORT};
+		}
+		for (@{$args{ADDRESS}}) {
+			return (Unix::Conf->_err ("masters", "illegal IP address `$_'"))
 				if (! __valid_ipaddress ($_));
 		}
-		# Reset old ones
-		$self->{masters}[1] = [];
-		push (@{$self->{masters}[1]}, @$addresses);
+		# reinit
+		@{$self->{masters}[1]}{@{$args{ADDRESS}}} = (1) x @{$args{ADDRESS}};
+		$self->dirty (1);
+	}
+
+	return (Unix::Conf->_err ("masters", "zone directive `masters' not defined"))
+		unless ($self->{masters});
+	return ([ $self->{masters}[0], [ keys (%{$self->{masters}[1]}) ] ]);
+}
+
+sub add_to_masters
+{
+	my $self = shift ();
+	my $addresses;
+
+	if (@_) {
+		if (ref ($_[0])) {
+			return (
+				Unix::Conf->_err (
+					"add_to_masters", 
+					"expected arguments are a list or an array reference"
+				)
+			) unless (UNIVERSAL::isa ($_[0], 'ARRAY'));
+			$addresses = $_[0];
+		}
+		else {
+			$addresses = \@_;
+		}
+		for (@$addresses) {
+			return (Unix::Conf->_err ("add_to_masters", "illegal IP address `$_'"))
+				if (! __valid_ipaddress ($_));
+			return (
+				Unix::Conf->_err ( "add_to_masters", "address `$_' already defined")
+			) if ($self->{masters}[1]{$_});
+		}
+		@{$self->{masters}[1]}{@$addresses} = (1) x @$addresses;
 		$self->dirty (1);
 		return (1);
 	}
-	return (
-		defined ($self->{masters}[1]) ?  [ @{$self->{masters}[1]} ] :
-			Unix::Conf->_err ('masters', "masters not defined")
-	);
+	return (Unix::Conf->_err ("add_to_masters", "addresses to be added not passed"));
+}
+
+sub delete_from_masters
+{
+	my $self = shift ();
+	my $addresses;
+
+	if (@_) {
+		if (ref ($_[0])) {
+			return (
+				Unix::Conf->_err (
+					"delete_from_masters", 
+					"expected arguments are a list or an array reference"
+				)
+			) unless (UNIVERSAL::isa ($_[0], 'ARRAY'));
+			$addresses = $_[0];
+		}
+		else {
+			$addresses = \@_;
+		}
+		for (@$addresses) {
+			return (Unix::Conf->_err ("delete_from_masters", "illegal IP address `$_'"))
+				if (! __valid_ipaddress ($_));
+			return (
+				Unix::Conf->_err ( "delete_from_masters", "address `$_' not defined" )
+			) unless ($self->{masters}[1]{$_});
+		}
+		delete (@{$self->{masters}[1]}{@$addresses});
+		# if no keys left delete the zone directive itself
+		delete ($self->{masters})
+			unless (keys (%{$self->{masters}[1]}));
+		$self->dirty (1);
+		return (1);
+	}
+	return (Unix::Conf->_err ("delete_from_masters", "addresses to be deleted not passed"));
 }
 
 =item masters_port ()
@@ -397,6 +974,8 @@ sub masters_port
 	my ($self, $port) = @_;
 
 	if (defined ($port)) {
+		return (Unix::Conf->_err ("masters", "illegal PORT `$port'"))
+			unless (__valid_port ($port));
 		$self->{masters}[0] = $port;
 		$self->dirty (1);
 		return (1);
@@ -407,534 +986,45 @@ sub masters_port
 	);
 }
 
-=item notify ()
+=item pubkey ()
 
  Arguments
- 'yes_no',    # optional
-
-Object method.
-Get/Set the object's notify attribute. If argument is passed, the method 
-tries to set the notify attribute to 'yes_no', and returns true if 
-successful, an Err object otherwise. If no argument is passed, returns the 
-notify of the zone, if defined, an Err object otherwise.
+ LIST			# flags, protocol, algorithm, string
+ or 
+ [ LIST ]		# same structure
 
 =cut
 
-sub notify
+sub pubkey 
 {
-	my ($self, $notify) = @_;
-
-	if (defined ($notify)) {
-		return (Unix::Conf->_err ('notify', "illegal syntax `notify  $notify'"))
-			if (! __valid_yesno ($notify));
-		$self->{notify} = $notify;
-		$self->dirty (1);
-		return (1);
-	}
-	return (
-		defined ($self->{notify}) ? $self->{notify} : Unix::Conf->_err ('notify', "notify not defined")
-	);
-}
-
-=item add_also_notify ()
-
- Arguments
- [ qw (ip1 ip2) ],
-
-Object method.
-Add the list of IP addresses specified in the argument, to the 
-also_notify list and return true if successful, an Err object 
-otherwise.
-
-=cut
-
-sub add_also_notify
-{
-	my ($self, $addresses) = @_;
-
-	if (defined ($addresses)) {
-		for (@$addresses) {
-			return (Unix::Conf->_err ('add_also_notify', "illegal IP address `$_'"))
-				if (! __valid_ipaddress ($_));
-		}
-		push (@{$self->{'also-notify'}}, @$addresses);
-		$self->dirty (1);
-		return (1);
-	}
-	return (Unix::Conf->_err ('add_also_notify', "addresses to be added not specified"));
-}
-
-=item also_notify ()
-
- Arguments
- [ qw (ip1 ip2) ],
-
-Object method.
-Get/Set the object's also_notify attribute. If argument is passed, the 
-method tries to set the also_notify attribute to the list, and returns 
-true if successful, an Err object otherwise. If no argument is passed, returns 
-an array ref containing the also_notify list for zone, if defined, an Err 
-object otherwise.
-
-=cut
-
-sub also_notify
-{
-	my ($self, $addresses) = @_;
-
-	if (defined ($addresses)) {
-		for (@$addresses) {
-			return (Unix::Conf->_err ('also_notify', "illegal IP address `$_'"))
-				if (! __valid_ipaddress ($_));
-		}
-		# Reset old ones
-		$self->{'also-notify'} = [];
-		push (@{$self->{'also-notify'}}, @$addresses); 
-		$self->dirty (1);
-		return (1);
-	}
-	return (
-		defined ($self->{'also-notify'}) ? $self->{'also-notify'} :
-			Unix::Conf->_err ('also_notify', "also-notify not defined")
-	);
-}
-
-=item forward ()
-
- Arguments
- 'yes_no',    # optional
-
-Object method.
-Get/Set the object's forward attribute. If argument is passed, the method 
-tries to set the forward of the zone object to 'yes_no', and returns true 
-if successful, an Err object otherwise. If no argument is passed, returns 
-the forward of the zone, if defined, an Err object otherwise.
-
-=cut
-
-sub forward
-{
-	my ($self, $val) = @_;
-
-	if (defined ($val)) {
-		return (Unix::Conf->_err ('forward', "zone directive `forward' can be used only for zone type `forward'"))
-			if ($self->type () ne 'forward');
-		return (Unix::Conf->_err ('forward', "illegal value($val) for zone directive `forward'"))
-			if (! __valid_forward ($val));
-		$self->{forward} = $val;
-		$self->dirty (1);
-		return (1);
-	}
-	return (
-		defined ($self->{forward}) ? $self->{forward} :
-			Unix::Conf->_err ('forward', "forward not defined")
-	);
-}
-
-=item forwarders ()
-
- Arguments
- [ qw (ip1 ip2) ],
-
-Object method.
-Get/Set the object's forwaders attribute. If argument is passed, the 
-method tries to set the forwaders list of the zone object to the list, 
-and returns true if successful, an Err object otherwise. If no argument 
-is passed, returns an array ref containing the forwaders list for zone, if 
-defined, an Err object otherwise.
-
-=cut
-
-sub forwarders 
-{
-	my ($self, $addresses) = @_;
-
-	if (defined ($addresses)) {
-		for (@$addresses) {
-			return (Unix::Conf->_err ('forwarders', "illegal IP address `$_'"))
-				if (! __valid_ipaddress ($_));
-		}
-		# Reset old ones
-		$self->{forwarders} = [];
-		push (@{$self->{forwarders}}, @$addresses); 
-		$self->dirty (1);
-		return (1);
-	}
-	return (
-		defined ($self->{forwarders}) ? [ @{$self->{forwarders}} ] :
-			Unix::Conf->_err ('fowarders', "forwarders not defined")
-	);
-}
-
-=item add_forwaders ()
-
- Arguments
- [ qw (ip1 ip2) ],
-
-Object method.
-Add the list of IP addresses specified in the argument, to the forwaders 
-list and return true if successful, an Err object otherwise.
-
-=cut
-
-sub add_forwarders
-{
-	my ($self, $addresses) = @_;
-
-	if (defined ($addresses)) {
-
-		for (@$addresses) {
-			return (Unix::Conf->_err ('forwarders', "illegal IP address `$_'\n"))
-				if (! __valid_ipaddress ($_));
-		}
-		push (@{$self->{forwarders}}, @$addresses); 
-		$self->dirty (1);
-		return (1);
-	}
-	return (Unix::Conf->_err ("add_also_forwarders", "forwarders not specified"));
-}
-
-=item add_allow_transfer ()
-
- Arguments
- [ qw (ip1 ip2) ],
-
-Object method.
-Add the list of IP addresses specified in the argument, to the allow_transfer 
-list and return true if successful, an Err object otherwise.
-
-=cut
-
-sub add_allow_transfer
-{
-	my ($self, $elements) = @_;
-
-	if ($elements) {
-		my $ret;
-		$self->{'allow-transfer'} = Unix::Conf::Bind8::Conf::Acl->new ()
-			unless ($self->{'allow-transfer'});
-		$ret = $self->{'allow-transfer'}->add_elements ($elements) or return ($ret);
-		$self->dirty (1);
-		return (1);
-	}
-	return (Unix::Conf->_err ('add_allow_transfer', "elements not specified"))
-}
-
-=item allow_transfer ()
-
- Arguments
- acl_object,    # optional
-
-Object method.
-Get/Set the object's allow_transfer attribute. This is represented by a 
-Unix::Conf::Bind8::Conf::Acl object. If argument is passed, the method 
-tries to set the allow_transfer attribute, and returns true if successful, 
-an Err object otherwise. If no argument is passed, the method returns the 
-value of the allow_transfer attribute, if defined, an Err object otherwise.
-
-=cut
-
-sub allow_transfer 
-{
-	my ($self, $acl) = @_;
-
-	if ($acl) {
-		my $ret;
-		return (Unix::Conf->_err ('allow_transfer', "argument must be a Unix::Conf::Bind8::Conf::Acl object"))
-			unless (UNIVERSAL::isa ($acl, 'Unix::Conf::Bind8::Conf::Acl'));
-		$self->{'allow-transfer'} = $acl;
-		$self->dirty (1);
-		return (1);
-	}
-	return (
-		defined ($self->{'allow-transfer'}) ? $self->{'allow-transfer'} :
-			Unix::Conf->_err ('allow_transfer', "allow-transfer not defined")
-	);
-}
-
-=item allow_transfer_elements ()
-
-Object method.
-Returns an array ref containing the elements of allow-transfer acl.
-
-=cut
-
-sub allow_transfer_elements
-{
-	return (
-		defined ($_[0]->{'allow-transfer'}) ? $_[0]->{'allow-transfer'}->elements () :
-			Unix::Conf->_err ('allow_transfer_elements', "allow-transfer not defined")
-	);
-}
-
-=item add_allow_query ()
-
- Arguments
- [ qw (ip1 ip2) ],
-
-Object method.
-Add the list of IP addresses specified in the argument, to the allow_query 
-list and return true if successful, an Err object otherwise.
-
-=cut
-
-sub add_allow_query
-{
-	my ($self, $elements) = @_;
-
-	if ($elements) {
-		my $ret;
-		$self->{'allow-query'} = Unix::Conf::Bind8::Conf::Acl->new ()
-			unless ($self->{'allow-query'});
-		$ret = $self->{'allow-query'}->add_elements ($elements) or return ($ret);
-		$self->dirty (1);
-		return (1);
-	}
-	return (Unix::Conf->_err ('add_allow_query', "elements not specified"))
-}
-
-=item allow_query ()
-
- Arguments
- acl_object,    # optional
-
-Object method.
-Get/Set the object's allow_query attribute. This is represented by a 
-Unix::Conf::Bind8::Conf::Acl object. If argument is passed, the method tries 
-to set the allow_query attribute, and returns true if successful, an Err 
-object otherwise. If no argument is passed, the method returns the value of 
-the allow_query attribute, if defined, an Err object otherwise.
-
-=cut
-
-sub allow_query
-{
-	my ($self, $acl) = @_;
-
-	if ($acl) {
-		my $ret;
-		return (Unix::Conf->_err ('allow_query', "argument must be a Unix::Conf::Bind8::Conf::Acl object"))
-			unless (UNIVERSAL::isa ($acl, 'Unix::Conf::Bind8::Conf::Acl'));
-		$self->{'allow-query'} = $acl;
-		$self->dirty (1);
-		return (1);
-	}
-	return (
-		defined ($self->{'allow-query'}) ? $self->{'allow-query'} :
-			Unix::Conf->_err ('allow_query', "allow-query not defined")
-	);
-}
-
-=item allow_query_elements ()
-
-Object method.
-Returns an array ref containing the elements of allow-query acl.
-
-=cut
-
-sub allow_query_elements
-{
-	return (
-		defined ($_[0]->{'allow-query'}) ? $_[0]->{'allow-query'}->elements () :
-			Unix::Conf->_err ('allow_query', "allow-query not defined")
-	);
-}
-
-=item add_allow_update ()
-
- Arguments
- [ qw (ip1 ip2) ],
-
-Object method.
-Add the list of IP addresses specified in the argument, to the allow_update 
-list and return true if successful, an Err object otherwise.
-
-=cut
-
-sub add_allow_update
-{
-	my ($self, $elements) = @_;
-
-	if ($elements) {
-		my $ret;
-		$self->{'allow-update'} = Unix::Conf::Bind8::Conf::Acl->new ()
-			unless ($self->{'allow-update'});
-		$ret = $self->{'allow-update'}->add_elements ($elements) or return ($ret);
-		$self->dirty (1);
-		return (1);
-	}
-	return (Unix::Conf->_err ('add_allow_update', "elements not specified"))
-}
-
-=item allow_update ()
-
- Arguments
- acl_object,    # optional
-
-Object method.
-Get/Set the object's allow_update attribute. This is represented by a 
-Unix::Conf::Bind8::Conf::Acl object. If argument is passed, the method tries 
-to set the allow_update attribute, and returns true if successful, an Err 
-object otherwise. If no argument is passed, the method returns the value of
-the allow_update attribute, if defined, an Err object otherwise.
-
-=cut
-
-sub allow_update
-{
-	my ($self, $acl) = @_;
-
-	if ($acl) {
-		my $ret;
-		return (Unix::Conf->_err ('allow_update', "argument must be a Unix::Conf::Bind8::Conf::Acl object"))
-			unless (UNIVERSAL::isa ($acl, 'Unix::Conf::Bind8::Conf::Acl'));
-		$self->{'allow-update'} = $acl;
-		$self->dirty (1);
-		return (1);
-	}
-	return (
-		defined ($self->{'allow-update'}) ? $self->{'allow-update'} :
-			Unix::Conf->_err ('allow_update', "allow-update not defined")
-	);
-}
-
-=item allow_update_elements ()
-
-Object method.
-Returns an array ref containing the elements of allow-update acl.
-
-=cut
-
-sub allow_update_elements
-{
-	return (
-		defined ($_[0]->{'allow-update'}) ? $_[0]->{'allow-update'}->elements () :
-			Unix::Conf->_err ('allow_update', "allow-update not defined")
-	);
-}
-
-=item check_names ()
-
- Arguments
- 'fail_warn_ignore',    # optional
-
-Object method.
-Get/Set zone check-names. If argument is passed, the method tries to 
-set the check-names of the zone object to 'fail_warn_ignore', and 
-returns true if successful, an Err object otherwise. If no argument 
-is specified, returns the value of the check-names attribute, if defined, 
-an Err object otherwise.
-
-=cut
-
-sub check_names
-{
-	my ($self, $val) = @_;
-
-	if (defined ($val)) {
-		return (Unix::Conf->_err ('check_names', "illegal value `$val' for zone directive `check-names'"))
-			if (! __valid_checknames ($val));
-		$self->{'check-names'} = $val;
-		$self->dirty (1);
-		return (1);
-	}
-	return (
-		defined ($self->{'check-names'}) ? $self->{'check-names'} :
-			Unix::Conf->_err ('check_names', "check-names not defined")
-	);
-}
-
-=item transfer_source ()
-
- Arguments
- 'IP Address',    # optional
-
-Object method.
-Get/Set the transfer-source attribute. If argument is passed, the method 
-tries to set the transfer-source attribute to 'IP Address', and returns 
-true if successful, an Err object otherwise. If no argument is passed, 
-returns the value of the transfer-source attribute, if defined, an Err 
-object otherwise.
-
-=cut
-
-sub transfer_source
-{
-	my ($self, $address) = @_;
-
-	if (defined ($address)) {
-		return (Unix::Conf->_err ('transfer_source', "illegal IP address `$address'"))
-			if (! __valid_ipaddress ($address));
-		$self->{'transfer-source'} = $address;
-		$self->dirty (1);
-		return (1);
-	}
+	my $self = shift ();
+	my $args;
 
 	return (
-		defined ($self->{'transfer-source'}) ? $self->{'transfer-source'} :
-			Unix::Conf->_err ('transfer_source', "transfer-source not defined")
-	);
-}
+		defined ($self->{pubkey}) ? [ @{$self->{pubkey}} ] :
+			Unix::Conf->_err ('pubkey', "zone directive `pubkey' not defined")
+	) unless (@_);
 
-=item max_transfer_time_in ()
-
- Arguments
- number,
-
-Object method.
-Get/Set the max-transfer-time-in attribute. If argument is passed, the 
-method tries to set the max-transfer-time-in attribute to number, and 
-returns true if successful, an Err object otherwise. If no argument is 
-passed, returns the value of the max-transfer-time-in attribute, if 
-defined, an Err object otherwise.
-
-=cut
-
-sub max_transfer_time_in
-{
-	my ($self, $number) = @_;
-
-	if (defined ($number)) {
-		return (Unix::Conf->_err ('max_transfer_time_in', "illegal number `$number'"))
-			if (! __valid_number ($number));
-		$self->{'max-transfer-time-in'} = $number;
-		$self->dirty (1);
-		return (1);
+	if (ref ($_[0])) {
+		return (Unix::Conf->_err ('pubkey', ""))
+			unless (UNIVERSAL::isa ($_[0], 'ARRAY'));
+		 $args = [ @{$_[0]} ];
 	}
-
-	return (
-		defined ($self->{'max-transfer-time-in'}) ? $self->{'max-transfer-time-in'} :
-			Unix::Conf->_err ('max_transfer_time_in', "max-transfer-time-in not defined")
-	);
-}
-
-=item dialup ()
-
- Arguments
- 'yes_no',    # optional
-
-Object method.
-Get/Set the object's dialup attribute. If argument is passed, the method 
-tries to set the dialup attribute to 'yes_no', and returns true if successful, 
-an Err object otherwise. If no argument is passed, returns the value of the 
-dialup attribute, if defined, an Err object otherwise.
-
-=cut
-
-sub dialup
-{
-	my ($self, $dialup) = @_;
-
-	if (defined ($dialup)) {
-		return (Unix::Conf->_err ('dialup', "illegal syntax `dialup  $dialup'"))
-			if (! __valid_yesno ($dialup));
-		$self->{dialup} = $dialup;
-		$self->dirty (1);
-		return (1);
+	elsif (@_ == 4) {
+		$args = [ @_ ];
 	}
-	return (
-		defined ($self->{dialup}) ? $self->{dialup} : Unix::Conf->_err ('dialup', "dialup not defined")
-	);
+	else {
+		return (
+			Unix::Conf->_err (
+				'pubkey', "expected arguments are LIST (flags, protocol, algorithm, key) or [ LIST ]"
+			)
+		);
+	}
+	# strip quotes if any.
+	$args->[3] =~ s/^"(.+)"$/$1/;
+	$self->{pubkey} = $args;
+	$self->dirty (1);
+	return (1);
 }
 
 =item delete_directive ()
@@ -952,7 +1042,7 @@ sub delete_directive
 {
 	my ($self, $dir) = @_;
 
-	return (Unix::Conf->_err ('delete_zonedir', "directive to be deleted not specified"))
+	return (Unix::Conf->_err ('delete_zonedir', "directive to be deleted not passed"))
 		unless ($dir);
 	# validate $dir 
 	return (Unix::Conf->_err ('delete_zonedir', "illegal zone directive `$dir'"))
@@ -993,12 +1083,3 @@ sub get_db
 }
 
 1;
-__END__
-
-=head1 TODO
-
-delete_zonedir* style methods could be autocreated through
-closures. Also there must be methods to delete individual
-members of ALLOW-UPDATE style attributes.
-
-=cut

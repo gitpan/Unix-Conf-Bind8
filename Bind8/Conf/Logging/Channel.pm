@@ -10,7 +10,7 @@ subdirective of the logging directive
 =head1 SYNOPSIS
 
     use Unix::Conf::Bind8;
-	my ($conf, $channel, $ret);
+    my ($conf, $channel, $ret);
 
     $conf = Unix::Conf::Bind8->new_conf (
         FILE        => '/etc/named.conf',
@@ -22,21 +22,23 @@ subdirective of the logging directive
         or $channel->die ("couldn't get channel `some_channel'");
 
     # assuming previous output was syslog change output to file
-	# and set severity to debug at level 3
+    # and set severity to debug at level 3
     $ret = $channel->output ('file')
         or $ret->die ("couldn't set output to `file'");
     $ret = $channel->file ('my.log')
-	    or $ret->die ("couldn't set file to `my.log'");
+        or $ret->die ("couldn't set file to `my.log'");
     $ret = $channel->severity ( { NAME => 'debug', LEVEL => 3 } )
-	    or $ret->die ("couldn't set severity");
-	# also enable print-severity
+        or $ret->die ("couldn't set severity");
+
+    # also enable print-severity
     $ret = $channel->print_severity ('yes')
-	    or $ret->die ("couldn't enable `print-severity'");
+        or $ret->die ("couldn't enable `print-severity'");
+
     # and delete the `print-category' channel directive
-	# not delete is not the same as disabling by setting
-	# print-severity to no
-	$ret = $channel->delete_print_severity ()
-	    or $ret->die ("couldn't delete `print-severity'");
+    # not delete is not the same as disabling by setting
+    # print-severity to no
+    $ret = $channel->delete_print_severity ()
+        or $ret->die ("couldn't delete `print-severity'");
 
 =head1 DESCRIPTION
 
@@ -94,10 +96,9 @@ sub new
 		$ret = $new->output ($args{OUTPUT}) or return ($ret);
 
 		if ($args{OUTPUT} eq 'file') {
-			return (Unix::Conf->_err ('output', "file path not specified for channel output 'file'"))
+			return (Unix::Conf->_err ('output', "no arguments set for channel output 'file'"))
 				unless ($args{FILE});
-			$ret = $new->file ( PATH => $args{FILE}, VERSIONS => $args{VERSIONS}, SIZE => $args{SIZE} )
-				or return ($ret);
+			$ret = $new->file (%{$args{FILE}}) or return ($ret);
 		}
 		elsif ($args{OUTPUT} eq 'syslog') {
 			return (Unix::Conf->_err ('output', "facility not specified for channel output `syslog'"))
@@ -131,7 +132,11 @@ sub delete
 {
 	my $self = $_[0];
 	my $ret;
-	$ret = Unix::Conf::Bind8::Conf::Logging::_del_channel ($_[0]) 
+
+	return (Unix::Conf->_err ("delete", "channel still in use, cannot delete"))
+		if (keys (%{$self->{categories}}));
+
+	$ret = Unix::Conf::Bind8::Conf::Logging::_del_channel ($self->_parent (), $self->name ()) 
 		or return ($ret);
 	$self->__dirty (1);
 	return (1);
@@ -179,10 +184,10 @@ sub name
 =item output ()
 
  Arguments
- 'OUTPUT',             #syslog|file|null
+ 'OUTPUT',             # syslog|file|null
 
 Object method.
-Get/Set attributes for the invoking object. 
+Get/set attributes for the invoking object. 
 If called with an argument, tries to set the output to argument and 
 returns true if successful, an Err object otherwise. Returns the 
 currently set output if set, an Err object otherwise if called without 
@@ -215,7 +220,7 @@ sub output
  SIZE      => size_spec,         # 'unlimited' | 'default' | NUMBER
 
 Object method.
-Get/Set file attributes for the invoking object.
+Get/set file attributes for the invoking object.
 If argument is passed, the method tries to set the file parameters and 
 returns true if successful, an Err object otherwise. Returns a hash ref 
 containing information in the same format as the argument, if defined, 
@@ -468,6 +473,50 @@ for my $directive (keys (%Channel_Directives)) {
 	};
 }
 
+=item categories ()
+
+Object method.
+Returns the categories that have defined this channel. In scalar context
+returns the number of categories, returns a list of category names in list
+context.
+
+=cut
+
+sub categories ()
+{
+	return (keys (%{$_[0]->{categories}}));
+}
+
+sub _add_category ()
+{
+	my $self = shift ();
+
+	return (Unix::Conf->_err ("_add_category", "categories to be added not passed"))
+		unless (@_);
+	
+	@{$self->{categories}}{@_} = (1) x @_;
+	return (1);
+}
+
+sub _delete_category ()
+{
+	my $self = shift ();
+
+	return (Unix::Conf->_err ("_delete_category", "categories to be deleted not passed"))
+		unless (@_);
+
+	for (@_) {
+		return (
+			Unix::Conf->_err (
+				"_delete_category", 
+				sprintf ("category `$_' does not use %s", $self->name ())
+			)
+		) unless ($self->{categories}{$_});
+	}
+	delete (@{$self->{categories}}{@_});
+	return (1);
+}
+
 sub __render 
 {
 	my $self = $_[0];
@@ -485,9 +534,15 @@ sub __render
 		$rendered .= ";\n";
 	}
 	elsif ($tmp eq 'syslog') {
+		# while the syntax in the man page indicates that
+		# a syslog facility is mandatory, the sample named.conf
+		# file that comes with named-8.2.3 has just such an
+		# example
 		my $facility;
-		$rendered .= "\t\tsyslog $facility;\n"
+		$rendered .= "\t\tsyslog";
+		$rendered .= " $facility"
 			if (($facility = $self->syslog ()));
+		$rendered .= ";\n";
 	}
 	elsif ($tmp eq 'null') {
 		$rendered .= "\t\tnull;\n";
@@ -518,6 +573,7 @@ sub __dirty
 	return ($_[0]->{PARENT}->dirty ());
 }
 
+# Stores the Logging object.
 sub _parent
 {
 	my ($self, $parent) = @_;

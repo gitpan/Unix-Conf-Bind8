@@ -11,6 +11,59 @@ statement in a Bind8 configuration file.
 
 Objects of this class contain a Unix::Conf::Bind8::Conf object 
 
+=head1 SYNOPSIS
+
+	use Unix::Conf::Bind8;
+
+	my ($conf, $include, $conf1, $ret);
+
+	$conf = Unix::Conf::Bind8->new_conf (
+		FILE        => '/etc/named.conf',
+		SECURE_OPEN => 1,
+	) or $conf->die ("couldn't open `named.conf'");
+
+	# 
+	# Ways to get an include object
+	#
+
+	$include = $conf->new_include (
+		FILE			=> 'slaves.conf',
+		SECURE_OPEN		=> 0,
+	) or $include->die ("couldn't create include object");
+
+	# OR
+
+	$include = $conf->get_include ('masters.conf')
+		or $include->die ("couldn't get include object");
+
+	#
+	# Operations that can be performed on an Include object
+	#
+	
+	# get embedded conf object.
+	$conf1 = $include->get_conf () 	
+		or $conf1->die ("couldn't get conf");
+
+	# set embedded conf object
+	$conf1 = Unix::Conf::Bind8->new_conf (
+		FILE		=> '/etc/masters.conf',
+		SECURE_OPEN	=> 0,
+	) $conf1->die ("couldn't create `masters.conf'");
+
+	$ret = $include->conf ($conf1)
+		or $ret->die ("couldn't set conf");
+
+	# delete include
+	$ret = $include->delete ()
+		or $ret->die ("couldn't delete");
+
+	# OR
+
+	$ret = $conf->delete_include ('slaves.conf')
+		or $ret->die ("couldn't delete");
+
+=head1 METHODS
+
 =cut
 
 package Unix::Conf::Bind8::Conf::Include;
@@ -31,10 +84,18 @@ use Unix::Conf::Bind8::Conf::Lib;
 
  Arguments
  FILE         => 'path of the configuration file',
- SECURE_OPEN  => 0/1,        # default 1 (enabled)
+ SECURE_OPEN  => 0/1,   # default 1 (enabled)
+ WHERE  => 'FIRST'|'LAST'|'BEFORE'|'AFTER'
+ WARG   => Unix::Conf::Bind8::Conf::Directive subclass object
+                        # WARG is to be provided only in case WHERE eq 'BEFORE 
+                        # or WHERE eq 'AFTER'
+ PARENT	=> reference,   # to the Conf object datastructure.
 
-Creates a Unix::Conf::Bind8::Conf::Include object with an embedded 
-Unix::Conf::Bind8::Conf object. 
+Class constructor.
+Creates a Unix::Conf::Bind8::Conf::Include object, with an embedded 
+Unix::Conf::Bind8::Conf object, and returns it, on success, an Err 
+object otherwise. Do not use this constructor directly. Use the 
+Unix::Conf::Bind8::Conf::new_include () method instead. 
 
 =cut
 
@@ -51,7 +112,7 @@ sub new
 	# Unix::Conf::Bind8::Conf->new () constructor
 	$args{ROOT} || return (Unix::Conf->_err ('new', "ROOT not specified"));
 	$new_conf = Unix::Conf::Bind8::Conf->new ( %args ) or return ($new_conf);
-	$new->conf ($new_conf);
+	$ret = $new->conf ($new_conf) or return ($ret);
 	$ret = Unix::Conf::Bind8::Conf::_add_include ($new) or return ($ret);
 	$args{WHERE} = 'LAST' unless ($args{WHERE});
 	$ret = Unix::Conf::Bind8::Conf::_insert_in_list ($new, $args{WHERE}, $args{WARG})
@@ -116,7 +177,7 @@ sub __render
 {
 	my $self = $_[0];
 
-	my $rendered = sprintf (qq (include "%s";\n), $self->conf ()->fh ());
+	my $rendered = sprintf (qq (include "%s";), $self->conf ()->fh ());
 	return ($self->_rstring (\$rendered));
 }
 

@@ -2,6 +2,24 @@
 #
 # Copyright Karthik Krishnamurthy <karthik.k@extremix.net>
 
+=head1 NAME
+
+Unix::Conf::Bind8::DB::A - Class representing A records.
+
+=head1 SYNOPSIS
+
+Refer to the SYNOPSIS section for Unix::Conf::Bind8::DB::Record.
+
+=head1 METHODS
+
+Methods specified here are overridden. They might or not be differnt from
+the derived ones. For other methods refer to the METHODS section for
+Unix::Conf::Bind8::DB::Record.
+
+=over 4
+
+=cut
+
 package Unix::Conf::Bind8::DB::SOA;
 
 use strict;
@@ -13,6 +31,28 @@ use Unix::Conf::Bind8::DB::Lib;
 use Unix::Conf::Bind8::DB::Record;
 
 our @ISA = qw (Unix::Conf::Bind8::DB::Record);
+
+=item new ()
+
+ Arguments
+ LABEL		=> 'string',
+ CLASS		=> 'string',	# 'IN'|'HS'|'CHAOS'
+ TTL		=> 'string'|number,
+ AUTH_NS	=> 'nameserver',
+ MAIL_ADDR	=> 'rp',
+ SERIAL		=> zone_serial_no	# number
+ REFRESH	=> refresh,
+ RETRY		=> retry,
+ EXPIRE		=> expire,
+ MIN_TTL	=> min_ttl,
+ PARENT		=> reference,	# to the DB object datastructure
+
+Class constructor.
+Creates a new Unix::Conf::Bind8::DB::* object and returns it
+if successful, an Err object otherwise. Do not use this constructor
+directly. Use the Unix::Conf::Bind8::DB::new_* equivalent instead.
+
+=cut
 
 # class constructor.
 # Arguments: hash
@@ -47,6 +87,18 @@ sub new
 	return ($new);
 }
 
+=item auth_ns ()
+
+ Arguments
+ 'auth_ns'
+
+Object method.
+Get/set the record's auth_ns. If an argument is passed, the invocant's
+auth_ns is set and true returned, on success, an Err object otherwise.
+If no argument is passed the invocant's auth_ns is returned.
+
+=cut
+
 sub auth_ns
 {
 	my ($self, $auth_ns) = @_;
@@ -62,6 +114,18 @@ sub auth_ns
 	);
 }
 
+=item mail_addr ()
+
+ Arguments
+ 'mail_addr'
+
+Object method.
+Get/set the record's mail_addr. If an argument is passed, the invocant's
+mail_addr is set and true returned, on success, an Err object otherwise.
+If no argument is passed the invocant's mail_addr is returned.
+
+=cut
+
 sub mail_addr
 {
 	my ($self, $mail_addr) = @_;
@@ -76,6 +140,18 @@ sub mail_addr
 			Unix::Conf->_err ('mail_addr', "MAIL_ADDR not defined")
 	);
 }
+
+=item serial ()
+
+ Arguments
+ 'serial'
+
+Object method.
+Get/set the record's serial. If an argument is passed, the invocant's
+serial is set and true returned, on success, an Err object otherwise.
+If no argument is passed the invocant's serial is returned.
+
+=cut
 
 sub serial
 {
@@ -93,6 +169,54 @@ sub serial
 			Unix::Conf->_err ('mail_addr', "SERIAL not defined")
 	);
 }
+
+=item refresh ()
+
+ Arguments
+ 'refresh'
+
+Object method.
+Get/set the record's refresh. If an argument is passed, the invocant's
+refresh is set and true returned, on success, an Err object otherwise.
+If no argument is passed the invocant's refresh is returned.
+
+=cut
+
+=item retry ()
+
+ Arguments
+ 'retry'
+
+Object method.
+Get/set the record's retry. If an argument is passed, the invocant's
+retry is set and true returned, on success, an Err object otherwise.
+If no argument is passed the invocant's retry is returned.
+
+=cut
+
+=item expire ()
+
+ Arguments
+ 'expire'
+
+Object method.
+Get/set the record's expire. If an argument is passed, the invocant's
+expire is set and true returned, on success, an Err object otherwise.
+If no argument is passed the invocant's expire is returned.
+
+=cut
+
+=item min_ttl ()
+
+ Arguments
+ 'min_ttl'
+
+Object method.
+Get/set the record's min_ttl. If an argument is passed, the invocant's
+min_ttl is set and true returned, on success, an Err object otherwise.
+If no argument is passed the invocant's min_ttl is returned.
+
+=cut
 
 for my $meth qw (refresh retry expire min_ttl) {
 	no strict 'refs';

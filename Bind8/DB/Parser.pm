@@ -37,6 +37,12 @@ sub __parse_db ($)
 	return (1);
 }
 
+sub __die ($;$)
+{
+	die ($_[0])	if (@_ == 1);
+	die (Unix::Conf->_err (sprintf ("$_[0]($FH:%s)",$FH->lineno ()), "$_[1]\n"))
+}
+
 sub __parse_loop ($$) 
 {
 	__pushfile ();
@@ -69,16 +75,22 @@ sub __parse_loop ($$)
 			$Include_Encountered = 1;
 			next;	
 		};
+
 		@tokens = split (/\s+/, $line);
 		# get label for the record
 		$token = shift (@tokens);
 		if ($token eq '@') {
-			$Args{LABEL} = $corigin;
+			$Args{LABEL} = __make_relative ($DB_Origin, $corigin);
 		}
-		elsif ($token) {		# blank
-			$Args{LABEL} = __make_absolute ($corigin, $token);
+		# __make_absolute only if label exists. otherwise
+		# we will do it to the last label, which could
+		# result in an error if it was empty.
+		elsif ($token) {
+			$Args{LABEL} = __make_relative ($DB_Origin, __make_absolute ($corigin, $token));
 		}
-		# elsif the LABEL is blank it should be the same as the last one.
+
+		# if there was no label specifed, the last one used 
+		# remains.
 
 		# check to see if next token is TTL or CLASS.
 		(($token = shift (@tokens)) =~ /^$ttl_pat$/)		&& do {
@@ -88,10 +100,12 @@ sub __parse_loop ($$)
 			$Args{CLASS} = $token; $token = shift (@tokens);
 		};
 		# at this point what we have must be the record type
-		die (Unix::Conf->_err ('__parse_db', "parse error in $FH"))
+		__die ('__parse_db', "illegal record type `$token'")
 			unless ($token =~ /^$type_pat$/);
 		$rtype = $token;
 		if ($rtype =~ /soa/i) {
+			__die ('__parse_loop', "SOA owner `$Args{LABEL}' not same as DB origin `$DB_Origin'")
+				if (__make_absolute ($DB_Origin, $Args{LABEL}) ne $DB_Origin);
 			($Args{AUTH_NS}, $Args{MAIL_ADDR}, $Args{SERIAL}, $Args{REFRESH},
 				$Args{RETRY}, $Args{EXPIRE}, $Args{MIN_TTL}) = @tokens;
 			$Args{AUTH_NS} 		= __make_relative ($corigin, $Args{AUTH_NS}); 
@@ -99,18 +113,18 @@ sub __parse_loop ($$)
 		}
 		elsif ($rtype =~ /mx/i) {
 			$Args{MXPREF} = shift (@tokens);
-			$Args{RDATA} = __make_absolute ($corigin, shift (@tokens));
+			$Args{RDATA} = __make_relative ($DB_Origin, __make_absolute ($corigin, shift (@tokens)));
 		}
 		# RDATA for A are not labels but IP addresses so don't try append with corigin
 		elsif ($rtype =~ /a/i) {
 			$Args{RDATA} = shift (@tokens);
 		}
 		else {
-			$Args{RDATA} = __make_absolute ($corigin, shift (@tokens));
+			$Args{RDATA} = __make_relative ($DB_Origin, __make_absolute ($corigin, shift (@tokens)));
 		}
 		# invoke as a subroutine but pass the object as the first
 		# argument, method like.
-		$ret = &{"new_\L$rtype\E"} ($DB, %Args) or die ($ret);
+		$ret = &{"new_\L$rtype\E"} ($DB, %Args) or __die ($ret);
 	}
 	__popfile ();
 }
@@ -125,8 +139,9 @@ sub __getline
 		if (s/^(.+)\(\s*$/$1/) {
 			my $tmp;
 			while (defined (($tmp = <$FH>))) {
+				$tmp =~ s/^(.*?);.*$/$1/;
 				$_ .= $tmp;
-				last if (s/^([^)]+)\)\s*$/$1/);
+				last if (s/^([^)]+)\).*$/$1/);
 			}
 			# remove any newline added above in the while loop
 			chomp;

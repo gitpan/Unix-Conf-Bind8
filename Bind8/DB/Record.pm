@@ -2,12 +2,75 @@
 #
 # Copyright Karthik Krishnamurthy <karthik.k@extremix.net>
 
+=head1	NAME
+
+Unix::Conf::Bind8::DB::Record - Base class which contains 
+methods which are inherited by the derived classes residing 
+under Unix::Conf::Bind8::DB.
+
+=head1 SYNOPSIS
+
+    use Unix::Conf::Bind8;
+
+    my ($conf, $db, $rec, $ret);
+
+    # get a db object from a valid Unix::Conf::Bind8::Conf object
+    $db = $conf->get_db ('extremix.net')
+        or $die ("couldn't get db object for `extremix.net'");
+	
+    # create a new A record. All new_* methods are similar except 
+    # for new_mx (), where an extra argument MXPREF has to be
+    # provided.
+    $rec = $db->new_a (
+        LABEL	=> 'www',
+        TTL		=> '1d',
+        RDATA	=> '192.168.1.1',
+    ) or $rec->die ("couldn't create A record for www.extremix.net");
+
+    $rec = $db->get_a ('www', '192.168.1.1')
+        or $rec->die ("couldn't get record object for www.extremix.net A 192.168.1.1");
+
+    # get attribute values
+    printf ("Class for record `www.extremix.net' A 192.168.1.1 is $ret\n")
+        if ($ret = $rec->class ());
+
+    # set attribute values
+    $ret = $rec->ttl ('1w') 			or $ret->die ("couldn't set ttl");
+    $ret = $rec->rdata ('192.168.2.1')	or $ret->die ("couldn't set rdata");
+
+    # delete record
+    $ret = $rec->delete () or $ret->die ("couldn't delete");
+
+=over 4
+
+=head1 METHODS
+
+=cut
+
 package Unix::Conf::Bind8::DB::Record;
 
 use strict;
 use warnings;
 use Unix::Conf;
 use Unix::Conf::Bind8::DB;
+use Unix::Conf::Bind8::DB::Lib;
+
+=item new ()
+
+ Arguments
+ LABEL		=> 'string',
+ CLASS		=> 'string',	# 'IN'|'HS'|'CHAOS'
+ TTL		=> 'string'|number,
+ RTYPE		=> 'string',	# 'A'|'NS'|'MX'|'SOA'|'CNAME'|'PTR'
+ RDATA		=> data
+ PARENT		=> reference,	# to the DB object datastructure
+
+Class constructor.
+Creates a new Unix::Conf::Bind8::DB::* object and returns it
+if successful, an Err object otherwise. Do not use this constructor
+directly. Use the Unix::Conf::Bind8::DB::new_* equivalent instead.
+
+=cut
 
 # Arguments
 #  LABEL
@@ -45,6 +108,18 @@ sub new
 	return ($new);
 }
 
+=item label ()
+
+ Arguments
+ 'label'
+
+Object method.
+Get/set the record's label. If an argument is passed, the invocant's
+label is set and true returned, on success, an Err object otherwise.
+If no argument is passed the invocant's label is returned.
+
+=cut
+
 sub label
 {
 	my ($self, $label) = @_;
@@ -69,7 +144,19 @@ sub label
 	);
 }
 
-# Get/Set class
+=item class ()
+
+ Arguments
+ 'class'
+
+Object method.
+Get/set the record's class. If an argument is passed, the invocant's
+class is set and true returned, on success, an Err object otherwise.
+If no argument is passed the invocant's class is returned, if defined,
+an Err object otherwise.
+
+=cut
+
 sub class 
 {
 	my ($self, $class) = @_;
@@ -89,6 +176,18 @@ sub class
 	)
 }
 
+=item rtype ()
+
+ Arguments
+ 'rtype'
+
+Object method.
+Get/set the record's rtype. If an argument is passed, the invocant's
+rtype is set and true returned, on success, an Err object otherwise.
+If no argument is passed the invocant's rtype is returned.
+
+=cut
+
 # Do not allow change in RTYPE once defined
 sub rtype
 {
@@ -102,6 +201,19 @@ sub rtype
 	}
 	return ($self->{RTYPE});
 }
+
+=item ttl ()
+
+ Arguments
+ ttl
+
+Object method.
+Get/set the record's ttl. If an argument is passed, the invocant's
+ttl is set and true returned, on success, an Err object otherwise.
+If no argument is passed the invocant's ttl is returned, if defined,
+an Err object otherwise.
+
+=cut
 
 sub ttl 
 {
@@ -119,6 +231,18 @@ sub ttl
 			Unix::Conf->_err ('ttl', "TTL not defined")
 	)
 }
+
+=item rdata ()
+
+ Arguments
+ data
+
+Object method.
+Get/set the record's rdata. If an argument is passed, the invocant's
+rdata is set and true returned, on success, an Err object otherwise.
+If no argument is passed the invocant's rdata is returned.
+
+=cut
 
 sub rdata
 {
@@ -149,6 +273,45 @@ sub rdata
 	);
 }
 
+=item dirty ()
+
+ Arguments
+ dirty	# numeric
+
+Object method.
+Get/set the dirty attribute. If an argument is passed, sets it
+as the value of the dirty attribute, and returns true on success,
+an Err object otherwise. If no argument is passed, returns the
+value of the attribute.
+
+=cut
+
+# we set the dirty flag in the containing object using the PARENT member.
+sub dirty
+{
+	my ($self, $dirty) = @_;
+
+	if (defined ($dirty)) {
+		$self->{PARENT}{DIRTY} = $dirty;
+		return (1);
+	}
+	return ($self->{PARENT}{DIRTY});
+}
+
+=item delete ()
+
+Object method.
+Deletes the invocant record and returns true on success,
+an Err object otherwise.
+
+=cut
+
+sub delete
+{
+	return (Unix::Conf::Bind8::DB::_delete_object ($_[0]));
+	$_[0]->dirty (1);
+}
+
 # this is used to set the memeber PARENT which points to the hash in
 # which we are contained. This helps us set the dirty flag in case
 # we are modified.
@@ -168,25 +331,6 @@ sub _parent
 			Unix::Conf->_err ('parent', "PARENT not defined")
 	);
 }
-
-# we set the dirty flag in the containing object using the PARENT member.
-sub dirty
-{
-	my ($self, $dirty) = @_;
-
-	if (defined ($dirty)) {
-		$self->{PARENT}{DIRTY} = $dirty;
-		return (1);
-	}
-	return ($self->{PARENT}{DIRTY});
-}
-
-sub delete
-{
-	return (Unix::Conf::Bind8::DB::_delete_object ($_[0]));
-	$_[0]->dirty (1);
-}
-
 
 1;
 __END__

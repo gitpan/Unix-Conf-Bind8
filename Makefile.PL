@@ -4,6 +4,6 @@ use ExtUtils::MakeMaker;
 WriteMakefile(
     'NAME'			=> 'Unix::Conf::Bind8',
     'VERSION_FROM'	=> 'Bind8.pm',
-    'PREREQ_PM'		=> { Unix::Conf => 0.1 },
+    'PREREQ_PM'		=> { Unix::Conf => 0.2 },
     'AUTHOR'		=> 'Karthik Krishnamurthy <karthik.k@extremix.net>'
 );

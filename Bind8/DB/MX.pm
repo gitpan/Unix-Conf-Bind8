@@ -2,6 +2,24 @@
 #
 # Copyright Karthik Krishnamurthy <karthik.k@extremix.net>
 
+=head1 NAME
+
+Unix::Conf::Bind8::DB::MX - Class representing MX records.
+
+=head1 SYNOPSIS
+
+Refer to the SYNOPSIS section for Unix::Conf::Bind8::DB::Record.
+
+=head1 METHODS
+
+Methods specified here are overridden. They might or not be differnt from
+the derived ones. For other methods refer to the METHODS section for
+Unix::Conf::Bind8::DB::Record.
+
+=over 4
+
+=cut
+
 package Unix::Conf::Bind8::DB::MX;
 
 use strict;
@@ -13,16 +31,27 @@ use Unix::Conf::Bind8::DB::Record;
 
 our (@ISA) = qw (Unix::Conf::Bind8::DB::Record);
 
-# Arguments
-#  LABEL
-#  RTYPE
-#  RDATA
-#  MXPREF
-#  PARENT
-#  CLASS
-#  TTL
+=item new ()
+
+ Arguments
+ LABEL		=> 'string',
+ CLASS		=> 'string',	# 'IN'|'HS'|'CHAOS'
+ TTL		=> 'string'|number,
+ RTYPE		=> 'string',	# 'A'|'NS'|'MX'|'SOA'|'CNAME'|'PTR'
+ MXPREF		=> mxpref		# number
+ RDATA		=> data
+ PARENT		=> reference,	# to the DB object datastructure
+
+Class constructor.
+Creates a new Unix::Conf::Bind8::DB::MX object and returns it
+if successful, an Err object otherwise. Do not use this constructor
+directly. Use the Unix::Conf::Bind8::DB::new_mx () equivalent instead.
+
+=cut
+
 # Override class constructor in base class. The difference is here we check
 # to see argument MXPREF is defined and assign it.
+
 sub new 
 {
 	my $class = shift ();
@@ -54,6 +83,18 @@ sub new
 
 	return ($new);
 }
+
+=item mxpref ()
+
+ Arguments
+ mxpref	# number
+
+Object method.
+Get/set the record's mxpref. If an argument is passed, the invocant's
+mxpref is set and true returned, on success, an Err object otherwise.
+If no argument is passed the invocant's mxpref is returned.
+
+=cut
 
 # Object method. Get/Set MXPREF
 sub mxpref

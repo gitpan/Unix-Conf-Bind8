@@ -2,6 +2,24 @@
 #
 # Copyright Karthik Krishnamurthy <karthik.k@extremix.net>
 
+=head1 NAME
+
+Unix::Conf::Bind8::DB::A - Class representing A records.
+
+=head1 SYNOPSIS
+
+Refer to the SYNOPSIS section for Unix::Conf::Bind8::DB::Record.
+
+=head1 METHODS
+
+Methods specified here are overridden. They might or not be differnt from
+the derived ones. For other methods refer to the METHODS section for
+Unix::Conf::Bind8::DB::Record.
+
+=over 4
+
+=cut
+
 package Unix::Conf::Bind8::DB::A;
 
 use strict;
@@ -12,6 +30,18 @@ use Unix::Conf::Bind8::Conf::Lib;
 use Unix::Conf::Bind8::DB::Record;
 
 our (@ISA) = qw (Unix::Conf::Bind8::DB::Record);
+
+=item rdata ()
+
+ Arguments
+ data
+
+Object method.
+Get/set the record's rdata. If an argument is passed, the invocant's
+rdata is set and true returned, on success, an Err object otherwise.
+If no argument is passed the invocant's rdata is returned.
+
+=cut
 
 # Override base class (Unix::Conf::Bind8::DB::Record) method. The only
 # difference is the validation of the IP address.
